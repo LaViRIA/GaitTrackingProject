@@ -44,9 +44,3 @@ A script that manages the post-processing of multiple captures in parallel, allo
 ### Process All
 
 It is an analysis and validation script that massively processes datasets (MCD and ArUco). It is responsible for reconstructing the lower body kinematics from the inertial sensor data and comparing the results with the optical reference (ArUco) to calculate position errors, generate performance graphs, and evaluate system accuracy.
-
----
-
-Author: Moises Badajoz Martínez <m.badajozmartinez@ugto.mx> <br>
-Laboratorio de Visión Robótica e Inteligencia Artificial <br>
-Universidad de Guanajuato

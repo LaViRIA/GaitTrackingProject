@@ -44,9 +44,3 @@ Un script que gestiona el posprocesado de diversas capturas en paralelo, permite
 ### Process All
 
 Ees un script de análisis y validación que procesa masivamente conjuntos de datos (MCD y ArUco). Se encarga de reconstruir la cinemática del tren inferior a partir de los datos de los sensores inerciales y compara los resultados con la referencia óptica (ArUco) para calcular errores de posición, generar gráficas de rendimiento y evaluar la precisión del sistema.
-
----
-
-Autor: Moises Badajoz Martínez <<m.badajozmartinez@ugto.mx>> <br>
-Laboratorio de Visión Robótica e Inteligencia Artificial <br>
-Universidad de Guanajuato
