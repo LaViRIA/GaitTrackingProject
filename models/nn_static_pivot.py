@@ -15,8 +15,8 @@ Directorio de salida: nn-results/static_pivot/
 Checkpoints: nn-results/static_pivot/checkpoints/best_static_model.pt
 
 Uso:
-    python nn_static_pivot.py                         # Entrenamiento + evaluación
-    python nn_static_pivot.py --eval-only             # Solo evaluación
+    python -m models.nn_static_pivot                         # Entrenamiento + evaluación
+    python -m models.nn_static_pivot --eval-only             # Solo evaluación
 
 Autor: GaitTracking Project
 """

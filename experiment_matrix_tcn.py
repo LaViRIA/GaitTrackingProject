@@ -61,7 +61,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 # Importar componentes de la red TCN Lite y utilidades de carga
-from nn_tcn_lite import (
+from models.nn_tcn_lite import (
     GaitMultiTaskNetTCN,
     GaitDataset,
     discover_captures,

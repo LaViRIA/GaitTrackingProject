@@ -18,9 +18,9 @@ Directorio de salida: nn-results/tcn_lite/
 Checkpoints: nn-results/tcn_lite/checkpoints/best_tcn_lite.pt
 
 Uso:
-    python nn_tcn_lite.py                         # Entrenamiento + evaluación completa
-    python nn_tcn_lite.py --eval-only             # Solo evaluación con modelo guardado
-    python nn_tcn_lite.py --epochs 500 --lr 1e-4  # Hiperparámetros personalizados
+    python -m models.nn_tcn_lite                         # Entrenamiento + evaluación completa
+    python -m models.nn_tcn_lite --eval-only             # Solo evaluación con modelo guardado
+    python -m models.nn_tcn_lite --epochs 500 --lr 1e-4  # Hiperparámetros personalizados
 
 Autor: GaitTracking Project
 """

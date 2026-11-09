@@ -1,26 +1,24 @@
 """
-Red Neuronal: TCN (Temporal Convolutional Network)
-===================================================
+Red Neuronal: Transformer Multitask (BiLSTM + Transformer)
+==========================================================
 Arquitectura:
-  - Temporal Convolutional Network (TCN) causal con convoluciones 1D dilatadas.
-  - Bloques residuales profundos con Dilated Conv1D + BatchNorm + GELU + Dropout.
-  - Cabezal Multitarea:
-      1. Rama de Pose Relativa: [batch, seq, 18] (6 articulaciones x 3 coords).
-      2. Rama de Desplazamiento de Cadera: [batch, seq, 3] (dx, dy, dz frame a frame).
-  - Función de pérdida compuesta (deep_multitask_loss) con 8 términos (pose, disp, speed, traj, height, bone, smooth).
+  - Extractor convolucional 1D inicial.
+  - Capa BiLSTM (Bidirectional Long Short-Term Memory) para dependencias de corto/mediano plazo.
+  - Transformer Encoder con Multi-Head Self-Attention y Positional Encoding.
+  - Cabezal de regresión Multitarea (Pose 3D relativa + Desplazamiento de cadera).
+  - Función de pérdida profunda compuesta (deep_multitask_loss).
 
 Propósito:
-  - Reconstrucción cinemática 3D completa y continua del tren inferior a partir de secuencias temporales
-    de 4 sensores IMU (RF, RT, LF, LT).
-  - Inferencia secuencial robusta con alta capacidad temporal y receptiva.
+  - Reconstrucción cinemática 3D completa de la marcha modelando la atención espacial y temporal
+    entre todos los pasos temporales de la secuencia.
 
-Directorio de salida: nn-results/tcn/
-Checkpoints: nn-results/tcn/checkpoints/best_tcn.pt
+Directorio de salida: nn-results/transformer_multitask/
+Checkpoints: nn-results/transformer_multitask/checkpoints/best_multitask_model_trans.pt
 
 Uso:
-    python nn_tcn.py                         # Entrenamiento + evaluación completa
-    python nn_tcn.py --eval-only             # Solo evaluación con modelo guardado
-    python nn_tcn.py --epochs 300 --lr 5e-4  # Hiperparámetros personalizados
+    python -m models.nn_transformer_multitask                         # Entrenamiento + evaluación completa
+    python -m models.nn_transformer_multitask --eval-only             # Solo evaluación con modelo guardado
+    python -m models.nn_transformer_multitask --epochs 500 --lr 1e-4  # Hiperparámetros personalizados
 
 Autor: GaitTracking Project
 """
@@ -60,31 +58,44 @@ from process_all import (
 #  CONFIGURACIÓN
 # ═══════════════════════════════════════════════════════════════════════
 
-DATASET_PATH = Path("/home/moybadajoz/Documents/DataSet")
-DATA_SPLIT_PATH = Path("data_split.json")
-RESULTS_DIR = Path("nn-results/tcn")
+DATASET_PATH = (
+    Path("/home/badajoz/Documents/DataSet")
+    if Path("/home/badajoz/Documents/DataSet").exists()
+    else (
+        Path("/home/moybadajoz/Documents/DataSet")
+        if Path("/home/moybadajoz/Documents/DataSet").exists()
+        else Path("../DataSet")
+    )
+)
+DATA_SPLIT_PATH = (
+    Path(__file__).resolve().parent / "data_split.json"
+    if (Path(__file__).resolve().parent / "data_split.json").exists()
+    else Path("data_split.json")
+)
+RESULTS_DIR = Path("nn-results/transformer_multitask")
 CHECKPOINT_DIR = RESULTS_DIR / "checkpoints"
-CHECKPOINT_NAME = "best_tcn.pt"
+CHECKPOINT_NAME = "best_multitask_model_trans.pt"
 CHECKPOINT_PATH = CHECKPOINT_DIR / CHECKPOINT_NAME
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ── Datos ─────────────────────────────────────────────────────────────
-WINDOW_SIZE = 50  # muestras por ventana (1.5s a 100Hz)
-WINDOW_STRIDE = 3  # desplazamiento entre ventanas (0.25s overlap para dataset denso)
+WINDOW_SIZE = 150  # muestras por ventana (1.5s a 100Hz)
+WINDOW_STRIDE = 25  # desplazamiento entre ventanas (0.25s overlap para dataset denso)
 CUTOFF_FREQ = 7  # Hz, filtro pasa-bajas del MCD
 FILTER_ORDER = 6  # orden del filtro Butterworth
 
-# ── Modelo (TCN Estándar / Completo) ──────────────────────────────────
-TCN_CHANNELS = [32, 32, 64, 64]  # canales por bloque TCN
-TCN_KERNEL_SIZES = [7, 7, 5, 5]  # tamaño de kernel por bloque
-TCN_DILATIONS = [1, 2, 4, 8]  # dilatación por bloque (RF total ≈ 150)
-HEAD_HIDDEN_DIM = 64  # neuronas en la capa oculta de las cabezas multitarea
-DROPOUT = 0.15  # regularización estándar para el modelo completo
+# ── Modelo ────────────────────────────────────────────────────────────
+CNN_CHANNELS = [4, 8, 16]
+LSTM_HIDDEN = 12
+LSTM_LAYERS = 3
+N_ATTENTION_HEADS = 12
+N_ATTENTION_LAYERS = 3
+DROPOUT = 0.20
 
 # ── Entrenamiento ────────────────────────────────────────────────────
-BATCH_SIZE = 24
+BATCH_SIZE = 64
 LEARNING_RATE = 5e-4
-WEIGHT_DECAY = 1e-4
+WEIGHT_DECAY = 1e-5
 EPOCHS = 300
 PATIENCE = 60  # Early stopping
 GRAD_CLIP = 1.0
@@ -212,6 +223,8 @@ def prepare_capture(mcd_path: str, aruco_path: str, crop: bool = True) -> dict |
                 except Exception:
                     pass  # En caso de que haya muy pocos datos para el filtro
 
+        # (Las longitudes óseas de fémur y tibia se calcularán a partir de las distancias 3D reales entre marcadores)
+
         # ── Apilar canales de sensores: [N, 24] ──────────────────────
         mcd_time = mcd_data["time"]
         N = len(mcd_time)
@@ -263,7 +276,7 @@ def prepare_capture(mcd_path: str, aruco_path: str, crop: bool = True) -> dict |
         # ── Profundidad en Marcha Recta: Hip Center Y=0 y planos Sagitales +-1/2 hip_width ──
         # Obtener ancho de cadera anthropométrico de las medidas del MCD
         raw_hw = float(mcd_data["measures"].get("hip_width", 0.25))
-        hip_width = raw_hw  # if raw_hw > 0.05 else 0.25
+        hip_width = raw_hw if raw_hw > 0.05 else 0.25
         half_hw = hip_width / 2.0
 
         # Signo de Y según dirección de marcha ('L' -> hip_r en +Y, 'R' -> hip_r en -Y)
@@ -540,43 +553,32 @@ class GaitDataset(Dataset):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  ARQUITECTURA DEL MODELO — TCN MULTITAREA
+#  ARQUITECTURA DEL MODELO
 # ═══════════════════════════════════════════════════════════════════════
 
 
-class TCNBlock(nn.Module):
-    """
-    Bloque de Temporal Convolutional Network con convolución 1D dilatada,
-    BatchNorm, GELU, Dropout y conexión residual.
-
-    La convolución dilatada permite un receptive field exponencialmente
-    creciente sin pooling ni recurrencia.
-    """
+class Conv1DBlock(nn.Module):
+    """Bloque convolucional 1D con BatchNorm, GELU y Dropout."""
 
     def __init__(
         self,
         in_channels: int,
         out_channels: int,
         kernel_size: int = 7,
-        dilation: int = 1,
-        dropout: float = 0.2,
+        dropout: float = 0.1,
     ):
         super().__init__()
-        # Padding "same" para dilatación: (k-1)*d // 2
-        padding = (kernel_size - 1) * dilation // 2
-
         self.conv = nn.Conv1d(
             in_channels,
             out_channels,
             kernel_size,
-            padding=padding,
-            dilation=dilation,
+            padding=kernel_size // 2,
         )
         self.bn = nn.BatchNorm1d(out_channels)
         self.act = nn.GELU()
         self.dropout = nn.Dropout(dropout)
 
-        # Conexión residual con proyección 1×1 si cambian los canales
+        # Conexión residual si las dimensiones coinciden
         self.residual = (
             nn.Conv1d(in_channels, out_channels, 1)
             if in_channels != out_channels
@@ -587,26 +589,39 @@ class TCNBlock(nn.Module):
         # x: [batch, channels, seq_len]
         residual = self.residual(x)
         x = self.conv(x)
-        # Recortar si la salida es ligeramente más larga que la entrada
-        if x.size(2) != residual.size(2):
-            x = x[:, :, : residual.size(2)]
         x = self.bn(x)
         x = self.act(x)
         x = self.dropout(x)
         return x + residual
 
 
-class GaitMultiTaskNetTCN(nn.Module):
-    """
-    Red Neuronal Multitarea TCN (Temporal Convolutional Network) para Reconstrucción de Marcha.
+class PositionalEncoding(nn.Module):
+    """Codificación posicional sinusoidal para secuencias temporales."""
 
-    Utiliza una Temporal Convolutional Network (TCN) con convoluciones dilatadas
-    para capturar dependencias temporales a largo plazo con un receptive field
-    configurable y alta capacidad de representación.
+    def __init__(self, d_model: int, max_len: int = 5000):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model)
+        )
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)  # [1, max_len, d_model]
+        self.register_buffer("pe", pe)
+
+    def forward(self, x):
+        # x: [batch, seq_len, d_model]
+        return x + self.pe[:, : x.size(1), :]
+
+
+class GaitMultiTaskNet(nn.Module):
+    """
+    Red Neuronal Profunda Multitarea para Reconstrucción de Marcha (Opción C).
+    Combina la cinemática articular 3D y la odometría inercial pélvica con anclaje cinemático.
 
     Arquitectura:
-      - Input Projection: Linear → GELU → LayerNorm
-      - Backbone TCN: 4 bloques Conv1D dilatados con residuales
+      - Backbone Compartido: 1D CNN → BiLSTM (3 capas) → Multi-Head Self-Attention
       - Cabeza 1 (Pose Head): Pose articular 3D [batch, seq_len, 18]
       - Cabeza 2 (Displacement Head): Desplazamiento pélvico 3D [batch, seq_len, 3]
     """
@@ -615,63 +630,80 @@ class GaitMultiTaskNetTCN(nn.Module):
         self,
         input_dim: int = INPUT_DIM,
         output_dim: int = OUTPUT_DIM,
-        tcn_channels: list[int] = None,
-        tcn_kernel_sizes: list[int] = None,
-        tcn_dilations: list[int] = None,
-        head_hidden_dim: int = HEAD_HIDDEN_DIM,
+        cnn_channels: list[int] = None,
+        lstm_hidden: int = LSTM_HIDDEN,
+        lstm_layers: int = LSTM_LAYERS,
+        n_heads: int = N_ATTENTION_HEADS,
+        n_attn_layers: int = N_ATTENTION_LAYERS,
         dropout: float = DROPOUT,
     ):
         super().__init__()
-        if tcn_channels is None:
-            tcn_channels = TCN_CHANNELS
-        if tcn_kernel_sizes is None:
-            tcn_kernel_sizes = TCN_KERNEL_SIZES
-        if tcn_dilations is None:
-            tcn_dilations = TCN_DILATIONS
+        if cnn_channels is None:
+            cnn_channels = CNN_CHANNELS
 
-        # ── 1. Proyección de entrada ─────────────────────────────────
+        # ── 1. Proyección y Backbone Convolucional 1D ────────────────
         self.input_proj = nn.Sequential(
-            nn.Linear(input_dim, tcn_channels[0]),
+            nn.Linear(input_dim, cnn_channels[0]),
             nn.GELU(),
-            nn.LayerNorm(tcn_channels[0]),
         )
 
-        # ── 2. Backbone TCN (convoluciones dilatadas) ────────────────
-        self.tcn_blocks = nn.ModuleList()
-        channels_in = [tcn_channels[0]] + tcn_channels[:-1]
-        for i, (c_in, c_out) in enumerate(zip(channels_in, tcn_channels)):
-            self.tcn_blocks.append(
-                TCNBlock(
-                    c_in,
-                    c_out,
-                    kernel_size=tcn_kernel_sizes[i],
-                    dilation=tcn_dilations[i],
-                    dropout=dropout,
+        self.cnn_blocks = nn.ModuleList()
+        channels = [cnn_channels[0]] + cnn_channels
+        for i in range(len(cnn_channels)):
+            self.cnn_blocks.append(
+                Conv1DBlock(
+                    channels[i], channels[i + 1], kernel_size=7, dropout=dropout
                 )
             )
 
-        backbone_dim = tcn_channels[-1]
+        # ── 2. BiLSTM Temporal ───────────────────────────────────────
+        self.lstm = nn.LSTM(
+            cnn_channels[-1],
+            lstm_hidden,
+            lstm_layers,
+            batch_first=True,
+            bidirectional=True,
+            dropout=dropout if lstm_layers > 1 else 0,
+        )
+        self.lstm_norm = nn.LayerNorm(lstm_hidden * 2)
 
-        # ── 3. Cabezas de salida multitarea ──────────────────────────
+        # ── 3. Multi-Head Self-Attention ─────────────────────────────
+        self.pos_encoding = PositionalEncoding(lstm_hidden * 2)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=lstm_hidden * 2,
+            nhead=n_heads,
+            dim_feedforward=lstm_hidden * 4,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.attention = nn.TransformerEncoder(
+            encoder_layer, num_layers=n_attn_layers, enable_nested_tensor=False
+        )
 
+        # ── 4. Cabezas de Salida Multitarea ──────────────────────────
         # Cabeza 1: Pose Relativa [18]
         self.pose_head = nn.Sequential(
-            nn.LayerNorm(backbone_dim),
-            nn.Linear(backbone_dim, head_hidden_dim),
+            nn.LayerNorm(lstm_hidden * 2),
+            nn.Linear(lstm_hidden * 2, lstm_hidden),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(head_hidden_dim, output_dim),
+            nn.Linear(lstm_hidden, lstm_hidden // 2),
+            nn.GELU(),
+            nn.Linear(lstm_hidden // 2, output_dim),
         )
 
-        # Cabeza 2: Desplazamiento pélvico [3]
+        # Cabeza 2: Desplazamiento pélvico [3] — capacidad ampliada para odometría
         self.disp_head = nn.Sequential(
-            nn.LayerNorm(backbone_dim),
-            nn.Linear(backbone_dim, head_hidden_dim),
+            nn.LayerNorm(lstm_hidden * 2),
+            nn.Linear(lstm_hidden * 2, lstm_hidden),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(head_hidden_dim, 3),
+            nn.Linear(lstm_hidden, lstm_hidden // 2),
+            nn.GELU(),
+            nn.Linear(lstm_hidden // 2, 3),
         )
-
         self._init_weights()
 
     def _init_weights(self):
@@ -684,19 +716,27 @@ class GaitMultiTaskNetTCN(nn.Module):
                 nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.LSTM):
+                for name, param in m.named_parameters():
+                    if "weight" in name:
+                        nn.init.orthogonal_(param)
+                    elif "bias" in name:
+                        nn.init.zeros_(param)
 
     def forward(self, x):
-        # x: [batch, seq_len, input_dim]
-        h = self.input_proj(x)  # [batch, seq_len, tcn_ch[0]]
-        h = h.transpose(1, 2)  # [batch, tcn_ch[0], seq_len]
+        h = self.input_proj(x)
+        h_cnn = h.transpose(1, 2)
+        for block in self.cnn_blocks:
+            h_cnn = block(h_cnn)
+        h = h_cnn.transpose(1, 2)
 
-        for block in self.tcn_blocks:
-            h = block(h)  # [batch, tcn_ch[-1], seq_len]
+        h_lstm, _ = self.lstm(h)
+        h_lstm = self.lstm_norm(h_lstm)
+        h_pos = self.pos_encoding(h_lstm)
+        features = self.attention(h_pos)
 
-        h = h.transpose(1, 2)  # [batch, seq_len, backbone_dim]
-
-        pred_pose = self.pose_head(h)  # [batch, seq_len, 18]
-        pred_disp = self.disp_head(h)  # [batch, seq_len, 3]
+        pred_pose = self.pose_head(features)
+        pred_disp = self.disp_head(features)
         return pred_pose, pred_disp
 
     def count_parameters(self) -> int:
@@ -707,7 +747,7 @@ def print_model_summary(model: nn.Module):
     """Imprime una tabla detallada de la arquitectura del modelo, capas y parámetros."""
     print()
     print("═" * 80)
-    print("  🧠 ARQUITECTURA DE LA RED NEURONAL MULTITAREA (GaitMultiTaskNetTCN — TCN)")
+    print("  🧠 ARQUITECTURA DE LA RED NEURONAL MULTITAREA (GaitMultiTaskNet)")
     print("═" * 80)
     print(f"  {'Módulo / Bloque':<32} │ {'Tipo de Capa':<24} │ {'Parámetros':>15}")
     print("  " + "─" * 76)
@@ -895,6 +935,7 @@ def train_multitask_epoch(
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     scaler: GradScaler,
+    scheduler: torch.optim.lr_scheduler._LRScheduler | None = None,
     epoch: int = 0,
     total_epochs: int = 0,
 ) -> dict:
@@ -1040,14 +1081,10 @@ def train_multitask_model(
     lr: float = LEARNING_RATE,
     patience: int = PATIENCE,
     checkpoint_tag: str = "",
-    checkpoint_dir: Path = None,
 ) -> dict:
     """
     Entrena la red multitarea con early stopping y gradientes combinados.
     """
-    if checkpoint_dir is None:
-        checkpoint_dir = CHECKPOINT_DIR
-
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=WEIGHT_DECAY)
     scaler = GradScaler("cuda", enabled=(DEVICE.type == "cuda"))
 
@@ -1072,17 +1109,19 @@ def train_multitask_model(
     patience_counter = 0
     best_state = None
 
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
     print()
     print("═" * W)
-    print("  🧠 ENTRENAMIENTO MULTITAREA TCN")
+    print("  🧠 ENTRENAMIENTO MULTITAREA UNIFICADO (Opción C)")
     print("═" * W)
     print(f"  Parámetros:        {model.count_parameters():,}")
     print(f"  Train batches:     {len(train_loader)}")
     print(f"  Val batches:       {len(val_loader)}")
     print(f"  Épocas máx:        {epochs}")
     print(f"  Early stopping:    {patience} épocas")
+    if checkpoint_tag:
+        print(f"  Checkpoint tag:    {checkpoint_tag}")
     print("═" * W)
     print()
 
@@ -1108,9 +1147,10 @@ def train_multitask_model(
             best_epoch = epoch
             patience_counter = 0
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-
             ckpt_name = (
-                f"best_tcn_{checkpoint_tag}.pt" if checkpoint_tag else CHECKPOINT_NAME
+                f"best_multitask_model_trans_{checkpoint_tag}.pt"
+                if checkpoint_tag
+                else CHECKPOINT_NAME
             )
             torch.save(
                 {
@@ -1118,7 +1158,7 @@ def train_multitask_model(
                     "model_state_dict": best_state,
                     "val_loss": best_val_loss,
                 },
-                checkpoint_dir / ckpt_name,
+                CHECKPOINT_DIR / ckpt_name,
             )
         else:
             patience_counter += 1
@@ -1189,6 +1229,7 @@ def predict_full_sequence_multitask(
 
     for start in range(0, N - window_size + 1, stride):
         end = start + window_size
+        x = np.concatenate([sensor_norm[start:end], anthro_broadcast], axis=1)
         x = np.concatenate([sensor_norm[start:end], anthro_broadcast], axis=1).astype(
             np.float32
         )
@@ -1207,6 +1248,11 @@ def predict_full_sequence_multitask(
     valid = counts > 0
     pred_pose_sum[valid] /= counts[valid, np.newaxis]
     pred_disp_sum[valid] /= counts[valid, np.newaxis]
+
+    # Clamp de seguridad: limitar desplazamiento por frame a un máximo físicamente razonable
+    # (~5 m/s @ 100Hz = 0.05 m/frame, suficiente para sprint; previene divergencia catastrófica)
+    MAX_DISP_PER_FRAME = 0.05
+    pred_disp_sum = np.clip(pred_disp_sum, -MAX_DISP_PER_FRAME, MAX_DISP_PER_FRAME)
 
     # Integración del desplazamiento pélvico con corrección de anclaje de altura Z al suelo
     if initial_hip is not None and len(initial_hip) > 0:
@@ -1344,6 +1390,7 @@ def compute_bland_altman(
         pred_flat = pred_ax.flatten()
         tgt_flat = tgt_ax.flatten()
 
+        mean_vals = (pred_flat + tgt_flat) / 2.0
         diff_vals = pred_flat - tgt_flat
 
         bias = float(np.mean(diff_vals))
@@ -1433,7 +1480,6 @@ def evaluate_on_captures(
     all_disp_preds = []
     all_disp_gts = []
     epe_list = []
-    per_capture_mpjpe = []
 
     # Para pipeline analítico
     all_ana_predictions = []
@@ -1481,8 +1527,6 @@ def evaluate_on_captures(
         all_hip_gts.append(hip_gt_valid)
         all_disp_preds.append(disp_pred_valid)
         all_disp_gts.append(disp_gt_valid)
-
-        per_capture_mpjpe.append(compute_mpjpe(pred_valid, gt_valid))
 
         final_diff = float(np.linalg.norm(hip_pred_valid[-1] - hip_gt_valid[-1]))
         epe_list.append(final_diff)
@@ -1637,7 +1681,7 @@ def evaluate_on_captures(
     print()
     print("═" * W)
     title_label = (
-        f"  📊 EVALUACIÓN COMPARATIVA – {label} (TCN vs Pipeline Analítico)"
+        f"  📊 EVALUACIÓN COMPARATIVA – {label} (NN vs Pipeline Analítico)"
         if has_ana
         else f"  📊 EVALUACIÓN – {label}"
     )
@@ -1685,7 +1729,7 @@ def evaluate_on_captures(
             f"     {'General':<14}  {mae['mean']:>8.4f} m  {mae_p95['mean']:>8.4f} m  {mae_ana['mean']:>14.4f} m  {mae_ana_p95['mean']:>14.4f} m  {win_mae:>9}"
         )
         for name in JOINT_NAMES:
-            win_j = "✅ NN" if mae_p95[name] < mae_ana[name] else "📐 Analítico"
+            win_j = "✅ NN" if mae_p95[name] < mae_ana_p95[name] else "📐 Analítico"
             print(
                 f"     {name:<14}  {mae[name]:>8.4f} m  {mae_p95[name]:>8.4f} m  {mae_ana[name]:>14.4f} m  {mae_ana_p95[name]:>14.4f} m  {win_j:>9}"
             )
@@ -1710,7 +1754,7 @@ def evaluate_on_captures(
             f"     {'General':<14}  {rmse['mean']:>8.4f} m  {rmse_p95['mean']:>8.4f} m  {rmse_ana['mean']:>14.4f} m  {rmse_ana_p95['mean']:>14.4f} m  {win_r:>9}"
         )
         for name in JOINT_NAMES:
-            win_j = "✅ NN" if rmse_p95[name] < rmse_ana[name] else "📐 Analítico"
+            win_j = "✅ NN" if rmse_p95[name] < rmse_ana_p95[name] else "📐 Analítico"
             print(
                 f"     {name:<14}  {rmse[name]:>8.4f} m  {rmse_p95[name]:>8.4f} m  {rmse_ana[name]:>14.4f} m  {rmse_ana_p95[name]:>14.4f} m  {win_j:>9}"
             )
@@ -1956,7 +2000,7 @@ def compare_with_analytical(
     """
     print()
     print("═" * W)
-    print("  🔀 COMPARACIÓN: Red Neuronal TCN vs Pipeline Analítico")
+    print("  🔀 COMPARACIÓN: Red Neuronal Multitarea vs Pipeline Analítico")
     print("═" * W)
 
     nn_errors = []
@@ -2128,7 +2172,7 @@ def plot_training_curves(history: dict, save_dir: Path):
     axes[2].set_yscale("log")
 
     plt.suptitle(
-        "Curvas de Entrenamiento – Red Neuronal TCN Multitarea",
+        "Curvas de Entrenamiento – Red Neuronal de Reconstrucción",
         fontsize=14,
         fontweight="bold",
     )
@@ -2140,10 +2184,7 @@ def plot_training_curves(history: dict, save_dir: Path):
 
 def plot_mpjpe_comparison(eval_metrics: dict, save_dir: Path):
     """Boxplot de MPJPE por articulación."""
-    if (
-        "per_capture_mpjpe" not in eval_metrics
-        or len(eval_metrics["per_capture_mpjpe"]) == 0
-    ):
+    if "per_capture_mpjpe" not in eval_metrics:
         return
 
     per_capture = eval_metrics["per_capture_mpjpe"]
@@ -2164,7 +2205,7 @@ def plot_mpjpe_comparison(eval_metrics: dict, save_dir: Path):
     ax.set_xticks(positions)
     ax.set_xticklabels([n.replace("_", " ").title() for n in JOINT_NAMES])
 
-    colors = ["#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5", "#70AD47"]
+    colors = ["#4472C4", "#ED7D31", "#A5A5A5", "#FFC000"]
     for patch, color in zip(bp["boxes"], colors):
         patch.set_facecolor(color)
         patch.set_alpha(0.7)
@@ -2213,8 +2254,7 @@ def plot_trajectory_comparison(
         fontweight="bold",
     )
 
-    plot_joints = [("knee_r", 2), ("knee_l", 3), ("ankle_r", 4), ("ankle_l", 5)]
-    for (j_name, j_idx), ax in zip(plot_joints, axes.flatten()):
+    for j_idx, (j_name, ax) in enumerate(zip(JOINT_NAMES, axes.flatten())):
         gt_x = gt[:, j_idx * 3]
         gt_z = gt[:, j_idx * 3 + 2]
         pred_x = pred[:, j_idx * 3]
@@ -2261,7 +2301,7 @@ def plot_nn_vs_analytical(comparison: dict, save_dir: Path):
         x - width / 2,
         comparison["nn_errors"],
         width,
-        label="Red Neuronal (TCN)",
+        label="Red Neuronal",
         color="#4472C4",
         alpha=0.8,
     )
@@ -2288,7 +2328,7 @@ def plot_nn_vs_analytical(comparison: dict, save_dir: Path):
         )
 
     # Resumen
-    methods = ["Red Neuronal (TCN)", "Analítico"]
+    methods = ["Red Neuronal", "Analítico"]
     means = [comparison["nn_mean"], comparison["analytical_mean"]]
     colors = ["#4472C4", "#ED7D31"]
     bars = axes[1].bar(methods, means, color=colors, alpha=0.8, width=0.5)
@@ -2305,7 +2345,7 @@ def plot_nn_vs_analytical(comparison: dict, save_dir: Path):
         )
 
     plt.suptitle(
-        "Comparación: Red Neuronal TCN vs Pipeline Analítico",
+        "Comparación: Red Neuronal vs Pipeline Analítico",
         fontsize=14,
         fontweight="bold",
     )
@@ -2328,7 +2368,7 @@ def plot_bland_altman_nn(eval_metrics: dict, save_dir: Path):
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))
     fig.suptitle(
-        "Bland-Altman: Red Neuronal TCN vs Ground Truth",
+        "Bland-Altman: Red Neuronal vs Ground Truth",
         fontsize=14,
         fontweight="bold",
     )
@@ -2422,75 +2462,13 @@ def plot_error_heatmap(eval_metrics: dict, save_dir: Path):
     print(f"  ✓ {save_dir / 'rmse_heatmap.png'}")
 
 
-def plot_displacement_analysis(eval_metrics: dict, save_dir: Path):
-    """Grafica el análisis de error del desplazamiento pélvico autónomo."""
-    if (
-        "displacement" not in eval_metrics
-        or len(eval_metrics.get("all_hip_preds", [])) == 0
-    ):
-        return
-
-    disp = eval_metrics["displacement"]
-    all_hip_p = eval_metrics["all_hip_preds"]
-    all_hip_g = eval_metrics["all_hip_gts"]
-
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-    # Ejemplo: Primera captura del conjunto de test
-    hip_p_cap = all_hip_p[0]
-    hip_g_cap = all_hip_g[0]
-    time_axis = np.arange(len(hip_p_cap)) * 0.01  # 100 Hz
-
-    # Subplot 1: Eje X (Avance frontal)
-    axes[0].plot(
-        time_axis, hip_g_cap[:, 0], "k-", linewidth=2, label="ArUco Ground Truth"
-    )
-    axes[0].plot(
-        time_axis, hip_p_cap[:, 0], "r--", linewidth=2, label="Red Neuronal (Autónoma)"
-    )
-    axes[0].set_xlabel("Tiempo (s)")
-    axes[0].set_ylabel("Posición X (m)")
-    axes[0].set_title(
-        f"Desplazamiento Frontal (Eje X) — ATE: {disp['ate_x']*100:.2f} cm",
-        fontweight="bold",
-    )
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-
-    # Subplot 2: Eje Z (Oscilación vertical)
-    axes[1].plot(
-        time_axis, hip_g_cap[:, 2], "k-", linewidth=2, label="ArUco Ground Truth"
-    )
-    axes[1].plot(
-        time_axis, hip_p_cap[:, 2], "b--", linewidth=2, label="Red Neuronal (Autónoma)"
-    )
-    axes[1].set_xlabel("Tiempo (s)")
-    axes[1].set_ylabel("Posición Z (m)")
-    axes[1].set_title(
-        f"Oscilación Vertical (Eje Z) — ATE: {disp['ate_z']*100:.2f} cm",
-        fontweight="bold",
-    )
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
-
-    plt.suptitle(
-        f"Análisis de Desplazamiento Pélvico — ATE Global: {disp['ate_mean']*100:.2f} cm │ EPE Deriva Final: {disp['epe_mean']*100:.2f} cm",
-        fontsize=13,
-        fontweight="bold",
-    )
-    plt.tight_layout()
-    fig.savefig(save_dir / "displacement_analysis.png", dpi=200, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  ✓ {save_dir / 'displacement_analysis.png'}")
-
-
 def create_3d_animation(
     capture: dict,
     nn_pred: np.ndarray,
     nn_valid: np.ndarray,
     save_path: Path,
     nn_hip_global: np.ndarray = None,
-    title: str = "Reconstrucción 3D: Red Neuronal TCN vs ArUco Ground Truth",
+    title: str = "Reconstrucción 3D: Red Neuronal vs ArUco Ground Truth",
     step_subsample: int = 2,
     interactive: bool = False,
 ):
@@ -2568,7 +2546,7 @@ def create_3d_animation(
         [],
         [],
         "o-",
-        label="Red Neuronal (TCN)",
+        label="Red Neuronal (NN)",
         color="#1F77B4",
         linewidth=3,
         markersize=6,
@@ -2647,7 +2625,7 @@ def create_3d_animation(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Reconstrucción de marcha con red neuronal TCN (Temporal Convolutional Network)"
+        description="Reconstrucción de marcha con redes neuronales"
     )
     parser.add_argument(
         "--eval-only",
@@ -2657,7 +2635,7 @@ def main():
     parser.add_argument(
         "--animate",
         action="store_true",
-        help="Generar animación 3D comparativa (TCN vs ArUco)",
+        help="Generar animación 3D comparativa (NN vs ArUco)",
     )
     parser.add_argument("--epochs", type=int, default=EPOCHS)
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
@@ -2669,31 +2647,6 @@ def main():
         type=str,
         default=str(DATASET_PATH),
         help="Ruta al dataset",
-    )
-    parser.add_argument(
-        "--results-dir",
-        type=str,
-        default=str(RESULTS_DIR),
-        help="Directorio de salida para resultados y checkpoints (default: nn-results/tcn)",
-    )
-    parser.add_argument(
-        "--tcn-channels",
-        nargs="+",
-        type=int,
-        default=TCN_CHANNELS,
-        help="Canales por bloque TCN (default: 64 64 128 128)",
-    )
-    parser.add_argument(
-        "--head-hidden-dim",
-        type=int,
-        default=HEAD_HIDDEN_DIM,
-        help="Dimensión oculta de las cabezas multitarea (default: 128)",
-    )
-    parser.add_argument(
-        "--dropout",
-        type=float,
-        default=DROPOUT,
-        help="Tasa de dropout (default: 0.25)",
     )
     parser.add_argument(
         "--n-val-subjects",
@@ -2725,7 +2678,7 @@ def main():
         "--patience",
         type=int,
         default=PATIENCE,
-        help="Paciencia del entrenamiento (default: 60)",
+        help="Paciencia del entrenamiento (default: 10)",
     )
     parser.add_argument(
         "--checkpoint",
@@ -2774,24 +2727,18 @@ def main():
             torch.cuda.manual_seed_all(args.seed)
 
     dataset_path = Path(args.dataset)
-    results_dir = Path(args.results_dir)
-    checkpoint_dir = results_dir / "checkpoints"
-
-    results_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
     print()
     print("═" * W)
-    print("  🦿 RECONSTRUCCIÓN DE MARCHA CON RED NEURONAL TCN")
+    print("  🦿 RECONSTRUCCIÓN DE MARCHA CON REDES NEURONALES")
     print("═" * W)
     print(f"  Dataset:          {dataset_path}")
+    print(f"  Data split:       {args.data_split}")
     print(f"  Device:           {DEVICE}")
     if DEVICE.type == "cuda":
         print(f"  GPU:              {torch.cuda.get_device_name(0)}")
-    print(f"  Resultados en:    {results_dir}")
-    print(f"  TCN Canales:      {args.tcn_channels}")
-    print(f"  Head Hidden Dim:  {args.head_hidden_dim}")
-    print(f"  Dropout:          {args.dropout}")
     print(f"  Window size:      {args.window_size}")
     print(f"  Window stride:    {args.window_stride}")
     print("═" * W)
@@ -2848,34 +2795,57 @@ def main():
 
     # ── 3. Dividir por sujeto (Configurable + data_split.json + Shuffle) ─
     split_path = Path(args.data_split) if args.data_split else None
+    if split_path and not split_path.exists():
+        alt_path = Path(__file__).resolve().parent / split_path
+        if alt_path.exists():
+            split_path = alt_path
+
+    loaded_from_split = False
     if (
         split_path
         and split_path.exists()
         and args.test_subjects is None
         and args.val_subjects is None
     ):
-        with open(split_path, "r") as f:
-            split_info = json.load(f)
-        train_subjects = [
-            str(s)
-            for s in split_info.get("train_subjects", [])
-            if str(s) in subjects_data
-        ]
-        val_subjects = [
-            str(s)
-            for s in split_info.get("val_subjects", [])
-            if str(s) in subjects_data
-        ]
-        test_subjects = [
-            str(s)
-            for s in split_info.get("test_subjects", [])
-            if str(s) in subjects_data
-        ]
-        print(f"\n  📊 División de datos cargada desde {split_path}:")
-        print(f"    Train ({len(train_subjects)} sujetos):      {train_subjects}")
-        print(f"    Validación ({len(val_subjects)} sujetos): {val_subjects}")
-        print(f"    Test ({len(test_subjects)} sujetos):       {test_subjects}")
-    else:
+        try:
+            with open(split_path, "r") as f:
+                split_info = json.load(f)
+            cand_train = [
+                str(s)
+                for s in split_info.get("train_subjects", [])
+                if str(s) in subjects_data
+            ]
+            cand_val = [
+                str(s)
+                for s in split_info.get("val_subjects", [])
+                if str(s) in subjects_data
+            ]
+            cand_test = [
+                str(s)
+                for s in split_info.get("test_subjects", [])
+                if str(s) in subjects_data
+            ]
+            if len(cand_train) > 0 and len(cand_val) > 0 and len(cand_test) > 0:
+                train_subjects = cand_train
+                val_subjects = cand_val
+                test_subjects = cand_test
+                loaded_from_split = True
+                print(f"\n  📊 División de datos cargada desde {split_path}:")
+                print(
+                    f"    Train ({len(train_subjects)} sujetos):      {train_subjects}"
+                )
+                print(f"    Validación ({len(val_subjects)} sujetos): {val_subjects}")
+                print(f"    Test ({len(test_subjects)} sujetos):       {test_subjects}")
+            else:
+                print(
+                    f"\n  ⚠️ [WARN] El archivo {split_path} no contiene suficientes sujetos válidos. Se usará partición automática."
+                )
+        except Exception as e:
+            print(
+                f"\n  ⚠️ [WARN] Error al leer {split_path}: {e}. Se usará partición automática."
+            )
+
+    if not loaded_from_split:
         subjects_pool = list(all_subjects)
         if args.shuffle_subjects:
             rng = random.Random(args.seed)
@@ -2903,6 +2873,16 @@ def main():
         print(f"    Train ({len(train_subjects)} sujetos):      {train_subjects}")
         print(f"    Validación ({len(val_subjects)} sujetos): {val_subjects}")
         print(f"    Test ({len(test_subjects)} sujetos):       {test_subjects}")
+
+    # Guardar división utilizada
+    split_record = {
+        "source": str(split_path) if loaded_from_split else "auto_generated",
+        "train_subjects": [int(s) if s.isdigit() else s for s in train_subjects],
+        "val_subjects": [int(s) if s.isdigit() else s for s in val_subjects],
+        "test_subjects": [int(s) if s.isdigit() else s for s in test_subjects],
+    }
+    with open(RESULTS_DIR / "data_split_used.json", "w") as f:
+        json.dump(split_record, f, indent=2)
 
     train_captures = []
     for s in train_subjects:
@@ -2964,12 +2944,9 @@ def main():
     )
 
     # ── 5. Crear modelo multitarea unificado ─────────────────────────
-    model = GaitMultiTaskNetTCN(
+    model = GaitMultiTaskNet(
         input_dim=INPUT_DIM,
         output_dim=OUTPUT_DIM,
-        tcn_channels=args.tcn_channels,
-        head_hidden_dim=args.head_hidden_dim,
-        dropout=args.dropout,
     ).to(DEVICE)
 
     print_model_summary(model)
@@ -2979,9 +2956,9 @@ def main():
         Path(args.checkpoint)
         if args.checkpoint
         else (
-            checkpoint_dir / f"best_tcn_{args.checkpoint_tag}.pt"
+            CHECKPOINT_DIR / f"best_multitask_model_trans_{args.checkpoint_tag}.pt"
             if args.checkpoint_tag
-            else checkpoint_dir / CHECKPOINT_NAME
+            else CHECKPOINT_PATH
         )
     )
 
@@ -2990,13 +2967,11 @@ def main():
         if not checkpoint_path.exists():
             print(f"  [ERROR] No se encontró checkpoint en {checkpoint_path}")
             sys.exit(1)
-        print(f"\n  📥 Cargando GaitMultiTaskNetTCN (TCN) desde {checkpoint_path}")
+        print(f"\n  📥 Cargando GaitMultiTaskNet desde {checkpoint_path}")
         checkpoint = torch.load(
             checkpoint_path, map_location=DEVICE, weights_only=False
         )
         model.load_state_dict(checkpoint["model_state_dict"])
-        if "norm_stats" in checkpoint:
-            norm_stats = checkpoint["norm_stats"]
     else:
         history = train_multitask_model(
             model,
@@ -3006,21 +2981,20 @@ def main():
             lr=args.lr,
             patience=args.patience,
             checkpoint_tag=args.checkpoint_tag,
-            checkpoint_dir=checkpoint_dir,
         )
 
         stats_to_save = {
             "mean": norm_stats["mean"].tolist(),
             "std": norm_stats["std"].tolist(),
         }
-        with open(checkpoint_dir / "norm_stats.json", "w") as f:
+        with open(CHECKPOINT_DIR / "norm_stats.json", "w") as f:
             json.dump(stats_to_save, f)
 
         # Guardar norm_stats también dentro del checkpoint .pt (evita bugs de float64)
         ckpt_path = (
-            checkpoint_dir / f"best_tcn_{args.checkpoint_tag}.pt"
+            CHECKPOINT_DIR / f"best_multitask_model_trans_{args.checkpoint_tag}.pt"
             if args.checkpoint_tag
-            else checkpoint_dir / CHECKPOINT_NAME
+            else CHECKPOINT_PATH
         )
         if ckpt_path.exists():
             ckpt = torch.load(ckpt_path, weights_only=False)
@@ -3029,7 +3003,7 @@ def main():
 
         # Guardar historial
         history_to_save = {k: [float(v) for v in vals] for k, vals in history.items()}
-        with open(results_dir / "training_history.json", "w") as f:
+        with open(RESULTS_DIR / "training_history.json", "w") as f:
             json.dump(history_to_save, f, indent=2)
 
     # ── 7. Evaluación en test set ────────────────────────────────────
@@ -3053,18 +3027,75 @@ def main():
         window_size=args.window_size,
     )
 
+
+def plot_displacement_analysis(eval_metrics: dict, save_dir: Path):
+    """Grafica el análisis de error del desplazamiento pélvico autónomo."""
+    if "displacement" not in eval_metrics or len(eval_metrics["all_hip_preds"]) == 0:
+        return
+
+    disp = eval_metrics["displacement"]
+    all_hip_p = eval_metrics["all_hip_preds"]
+    all_hip_g = eval_metrics["all_hip_gts"]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Ejemplo: Primera captura del conjunto de test
+    hip_p_cap = all_hip_p[0]
+    hip_g_cap = all_hip_g[0]
+    time_axis = np.arange(len(hip_p_cap)) * 0.01  # 100 Hz
+
+    # Subplot 1: Eje X (Avance frontal)
+    axes[0].plot(
+        time_axis, hip_g_cap[:, 0], "k-", linewidth=2, label="ArUco Ground Truth"
+    )
+    axes[0].plot(
+        time_axis, hip_p_cap[:, 0], "r--", linewidth=2, label="Red Neuronal (Autónoma)"
+    )
+    axes[0].set_xlabel("Tiempo (s)")
+    axes[0].set_ylabel("Posición X (m)")
+    axes[0].set_title(
+        f"Desplazamiento Frontal (Eje X) — ATE: {disp['ate_x']*100:.2f} cm",
+        fontweight="bold",
+    )
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+
+    # Subplot 2: Eje Z (Oscilación vertical)
+    axes[1].plot(
+        time_axis, hip_g_cap[:, 2], "k-", linewidth=2, label="ArUco Ground Truth"
+    )
+    axes[1].plot(
+        time_axis, hip_p_cap[:, 2], "b--", linewidth=2, label="Red Neuronal (Autónoma)"
+    )
+    axes[1].set_xlabel("Tiempo (s)")
+    axes[1].set_ylabel("Posición Z (m)")
+    axes[1].set_title(
+        f"Oscilación Vertical (Eje Z) — ATE: {disp['ate_z']*100:.2f} cm",
+        fontweight="bold",
+    )
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+
+    plt.suptitle(
+        f"Análisis de Desplazamiento Pélvico — ATE Global: {disp['ate_mean']*100:.2f} cm │ EPE Deriva Final: {disp['epe_mean']*100:.2f} cm",
+        fontsize=13,
+        fontweight="bold",
+    )
+    plt.tight_layout()
+    fig.savefig(save_dir / "displacement_analysis.png", dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  ✓ {save_dir / 'displacement_analysis.png'}")
+
     # ── 9. Gráficas de evaluación ────────────────────────────────────
     print("\n  🎨 Generando gráficas de evaluación...")
-    if not args.eval_only and history:
-        plot_training_curves(history, results_dir)
     if eval_metrics:
-        plot_mpjpe_comparison(eval_metrics, results_dir)
-        plot_bland_altman_nn(eval_metrics, results_dir)
-        plot_error_heatmap(eval_metrics, results_dir)
-        plot_displacement_analysis(eval_metrics, results_dir)
+        plot_mpjpe_comparison(eval_metrics, RESULTS_DIR)
+        plot_bland_altman_nn(eval_metrics, RESULTS_DIR)
+        plot_error_heatmap(eval_metrics, RESULTS_DIR)
+        plot_displacement_analysis(eval_metrics, RESULTS_DIR)
 
     if comparison:
-        plot_nn_vs_analytical(comparison, results_dir)
+        plot_nn_vs_analytical(comparison, RESULTS_DIR)
 
     # Trayectorias y animación 3D de ejemplo (primera captura del test set)
     if len(test_captures) > 0:
@@ -3093,12 +3124,12 @@ def main():
             cap,
             pred_pose,
             nn_valid,
-            results_dir,
+            RESULTS_DIR,
             capture_label=f"test_{sample_subject}_0",
         )
 
         anim_gif_path = (
-            results_dir / f"3d_animation_nn_vs_aruco_subject_{sample_subject}.gif"
+            RESULTS_DIR / f"3d_animation_nn_vs_aruco_subject_{sample_subject}.gif"
         )
         create_3d_animation(
             cap,
@@ -3106,7 +3137,7 @@ def main():
             nn_valid,
             anim_gif_path,
             nn_hip_global=pred_hip_global,
-            title=f"Reconstrucción 3D Autónoma (TCN vs ArUco) – Sujeto {sample_subject}",
+            title=f"Reconstrucción 3D Autónoma (Red Neuronal vs ArUco) – Sujeto {sample_subject}",
             interactive=args.animate,
         )
 
@@ -3127,7 +3158,7 @@ def main():
             "improvement_pct": comparison.get("improvement_pct", 0),
         }
 
-    with open(results_dir / "final_metrics.json", "w") as f:
+    with open(RESULTS_DIR / "final_metrics.json", "w") as f:
         json.dump(final_metrics, f, indent=2, default=str)
 
     # ── Resumen final ────────────────────────────────────────────────
@@ -3135,14 +3166,14 @@ def main():
     print("═" * W)
     print("  ✅ PROCESAMIENTO COMPLETO")
     print("═" * W)
-    print(f"  Resultados guardados en:   {results_dir.resolve()}")
-    print(f"  Modelo guardado en:        {checkpoint_dir.resolve()}")
-    if eval_metrics and "mpjpe" in eval_metrics:
-        print(f"  MPJPE (test):              {eval_metrics['mpjpe']['mean']:.4f} m")
-    if comparison and "nn_mean" in comparison:
+    print(f"  Resultados guardados en:   {RESULTS_DIR.resolve()}")
+    print(f"  Modelo guardado en:        {CHECKPOINT_DIR.resolve()}")
+    if eval_metrics:
+        print(f"  MPJPE (test):              " f"{eval_metrics['mpjpe']['mean']:.4f} m")
+    if comparison:
         print(f"  MPJPE NN:                  {comparison['nn_mean']:.4f} m")
-        print(f"  MPJPE Analítico:           {comparison['analytical_mean']:.4f} m")
-        print(f"  Mejora:                    {comparison['improvement_pct']:+.1f}%")
+        print(f"  MPJPE Analítico:           " f"{comparison['analytical_mean']:.4f} m")
+        print(f"  Mejora:                    " f"{comparison['improvement_pct']:+.1f}%")
     print("═" * W)
 
 

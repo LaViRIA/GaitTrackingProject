@@ -16,8 +16,8 @@ Directorio de salida: nn-results/pivot_classifier/
 Checkpoints: nn-results/pivot_classifier/checkpoints/best_pivot_classifier.pt
 
 Uso:
-    python nn_pivot_classifier.py                         # Entrenamiento + evaluación
-    python nn_pivot_classifier.py --eval-only             # Solo evaluación
+    python -m models.nn_pivot_classifier                         # Entrenamiento + evaluación
+    python -m models.nn_pivot_classifier --eval-only             # Solo evaluación
 
 Autor: GaitTracking Project
 """

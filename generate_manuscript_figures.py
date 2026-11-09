@@ -86,14 +86,14 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Import project utilities
 import evaluate_full_neural_vs_analytical as eval_module
-from nn_static_pivot import (
+from models.nn_static_pivot import (
     discover_captures,
     prepare_static_capture,
     JOINT_NAMES,
     N_JOINTS,
     N_COORDS,
 )
-from nn_tcn_lite import (
+from models.nn_tcn_lite import (
     GaitMultiTaskNetTCN,
     predict_full_sequence_multitask as predict_tcn,
 )
