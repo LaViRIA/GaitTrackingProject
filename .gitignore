@@ -6,3 +6,6 @@ config
 /__pycache__
 /Results
 /utils
+.ipynb_checkpoints/
+.pytest_cache/
+/v2_manuscript

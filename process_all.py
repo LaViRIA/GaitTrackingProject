@@ -1,18 +1,20 @@
-from ahrs.filters import Madgwick, EKF
-from tkinter import filedialog
-import matplotlib.pyplot as plt
-from scipy.spatial.transform import Rotation as R
-import numpy as np
-from pprint import pprint
-import csv
+import csv  # noqa: EXE002
 import glob
 import sys
-from scipy.signal import butter, filtfilt
-from scipy.spatial.transform import Slerp
-from scipy.interpolate import interp1d
-from pathlib import Path
-from multiprocessing import Pool
 import time
+from multiprocessing import Pool
+from pathlib import Path
+from pprint import pprint
+from tkinter import filedialog
+
+import matplotlib.pyplot as plt
+import numpy as np
+from ahrs.filters import EKF, Madgwick
+from scipy.interpolate import interp1d
+from scipy.signal import butter, filtfilt, find_peaks
+from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Slerp
+from scipy.stats import pearsonr
 
 # cache_dir = matplotlib.get_cachedir()
 # font_cache_dir = os.path.join(cache_dir, "fontlist-v310.json")
@@ -50,15 +52,15 @@ def rotation_matrix_from_vectors(vec_sensor, vec_world=[0, 0, 1]):
         return np.eye(3) + kmat + kmat @ kmat * ((1 - c) / (s**2))
 
 
-def low_pass_filter(data, cutoff_freq, fs):
+def low_pass_filter(data, cutoff_freq, fs, order=3):
     """
     Applies a low-pass filter to the given data.
 
     Args:
-        time (array-like): Array of timestamps.
         data (array-like): Array of values corresponding to the timestamps.
         cutoff_freq (float): Cutoff frequency of the low-pass filter in Hz.
         fs (float): Sampling frequency.
+        order (int): Filter order (default: 3).
 
     Returns:
         numpy.ndarray: Filtered data.
@@ -68,7 +70,6 @@ def low_pass_filter(data, cutoff_freq, fs):
     # Normalize the cutoff frequency
     normal_cutoff = cutoff_freq / nyq
     # Design the Butterworth filter
-    order = 3  # Filter order (can be adjusted)
     b, a = butter(order, normal_cutoff, btype="lowpass", analog=False)
     # Apply the filter using filtfilt for zero-phase filtering
     filtered_data = filtfilt(b, a, data)
@@ -117,9 +118,14 @@ def get_dataset() -> list[tuple[str, str]]:
     return files
 
 
-def read_mcd_file(path: str) -> dict[str, np.ndarray]:
+def read_mcd_file(path: str, cutoff_freq=7, filter_order=6) -> dict[str, np.ndarray]:
     """
     Read the mcd file and return a dictionary with the data.
+
+    Args:
+        path (str): Path to the MCD CSV file.
+        cutoff_freq (float): Cutoff frequency for the low-pass filter in Hz (default: 7).
+        filter_order (int): Order of the Butterworth filter (default: 3).
     """
     # abre el archivo y lo desglosa en diccionarios
     with open(path, "r") as file:
@@ -143,23 +149,32 @@ def read_mcd_file(path: str) -> dict[str, np.ndarray]:
     # convierte los datos a unidades (rad/s y m/s^2) y aplica un filtro pasabajas
     for i in ["RF", "RT", "LF", "LT"]:
 
-        mcd_data[f"gyro_{i}"] = np.array(
-            [
-                low_pass_filter(
-                    ((mcd_data[f"gyro_{i}"] / 16.4) * (np.pi / 180)).T[n], 7, fs
-                )
-                for n in range(3)
-            ]
-        ).T
+        mcd_data[f"gyro_{i}"] = (mcd_data[f"gyro_{i}"] / 16.4) * (np.pi / 180)
+        mcd_data[f"acceleration_{i}"] = (mcd_data[f"acceleration_{i}"] / 16_384) * 9.81
+        if cutoff_freq is not None:
+            mcd_data[f"gyro_{i}"] = np.array(
+                [
+                    low_pass_filter(
+                        mcd_data[f"gyro_{i}"].T[n],
+                        cutoff_freq,
+                        fs,
+                        order=filter_order,
+                    )
+                    for n in range(3)
+                ]
+            ).T
 
-        mcd_data[f"acceleration_{i}"] = np.array(
-            [
-                low_pass_filter(
-                    ((mcd_data[f"acceleration_{i}"] / 16_384) * 9.81).T[n], 7, fs
-                )
-                for n in range(3)
-            ]
-        ).T
+            mcd_data[f"acceleration_{i}"] = np.array(
+                [
+                    low_pass_filter(
+                        mcd_data[f"acceleration_{i}"].T[n],
+                        cutoff_freq,
+                        fs,
+                        order=filter_order,
+                    )
+                    for n in range(3)
+                ]
+            ).T
 
     return mcd_data
 
@@ -327,26 +342,51 @@ def get_all_poses(quats, points: dict[str, np.ndarray]) -> dict[str, np.ndarray]
     return pose
 
 
-def reorient_data(accel: np.ndarray, gyro: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    rest = np.mean(accel[:100], axis=0)
+def reorient_data(
+    accel: np.ndarray, gyro: np.ndarray, calibration_samples=100
+) -> tuple[np.ndarray, np.ndarray]:
+    rest = np.mean(accel[:calibration_samples], axis=0)
     rest /= np.linalg.norm(rest)
     accel_R = rotation_matrix_from_vectors(rest)
     reoriented_accel = (accel_R @ accel.T).T
     reoriented_gyro = (accel_R @ gyro.T).T
 
-
     return reoriented_accel, reoriented_gyro
 
 
-def get_orientation(mcd_data) -> dict[str, np.ndarray]:
+def get_orientation(
+    mcd_data,
+    pca_percentile=5,
+    madgwick_gain=0.01,
+    slerp_clip_min=0.3,
+    slerp_clip_max=0.7,
+    calibration_samples=60,
+    fusion_filter="madgwick",
+) -> dict[str, np.ndarray]:
     """
     Get the orientation of the sensors using the Madgwick filter.
     """
     reoriented_data = {
-        "rf": reorient_data(mcd_data["acceleration_RF"], mcd_data["gyro_RF"]),
-        "lf": reorient_data(mcd_data["acceleration_LF"], mcd_data["gyro_LF"]),
-        "rt": reorient_data(mcd_data["acceleration_RT"], mcd_data["gyro_RT"]),
-        "lt": reorient_data(mcd_data["acceleration_LT"], mcd_data["gyro_LT"]),
+        "rf": reorient_data(
+            mcd_data["acceleration_RF"],
+            mcd_data["gyro_RF"],
+            calibration_samples=calibration_samples,
+        ),
+        "lf": reorient_data(
+            mcd_data["acceleration_LF"],
+            mcd_data["gyro_LF"],
+            calibration_samples=calibration_samples,
+        ),
+        "rt": reorient_data(
+            mcd_data["acceleration_RT"],
+            mcd_data["gyro_RT"],
+            calibration_samples=calibration_samples,
+        ),
+        "lt": reorient_data(
+            mcd_data["acceleration_LT"],
+            mcd_data["gyro_LT"],
+            calibration_samples=calibration_samples,
+        ),
     }
     # # print(mcd_data.keys())
     # reoriented_data = {
@@ -371,75 +411,87 @@ def get_orientation(mcd_data) -> dict[str, np.ndarray]:
     s_p = 1000 / np.mean(np.diff(mcd_data["time"]))
     # print(s_p)
     # s_p = 100
-    gain = 0.033
-    quats = {
-        "rf": R.from_quat(
-            Madgwick(
-                reoriented_gyro["rf"], reoriented_accel["rf"], frequency=s_p, gain=gain
-            ).Q,
-            scalar_first=True,
-        ),
-        "lf": R.from_quat(
-            Madgwick(
-                reoriented_gyro["lf"], reoriented_accel["lf"], frequency=s_p, gain=gain
-            ).Q,
-            scalar_first=True,
-        ),
-        "rt": R.from_quat(
-            Madgwick(
-                reoriented_gyro["rt"], reoriented_accel["rt"], frequency=s_p, gain=gain
-            ).Q,
-            scalar_first=True,
-        ),
-        "lt": R.from_quat(
-            Madgwick(
-                reoriented_gyro["lt"], reoriented_accel["lt"], frequency=s_p, gain=gain
-            ).Q,
-            scalar_first=True,
-        ),
-        "hip": np.empty(0),
-    }
 
-    quats_ekf = {
-        "rf": R.from_quat(
-            EKF(
-                gyr=reoriented_gyro["rf"],
-                acc=reoriented_accel["rf"],
-                frequency=s_p,
-                frame="NED",
-            ).Q,
-            scalar_first=True,
-        ),
-        "lf": R.from_quat(
-            EKF(
-                gyr=reoriented_gyro["lf"],
-                acc=reoriented_accel["lf"],
-                frequency=s_p,
-                frame="NED",
-            ).Q,
-            scalar_first=True,
-        ),
-        "rt": R.from_quat(
-            EKF(
-                gyr=reoriented_gyro["rt"],
-                acc=reoriented_accel["rt"],
-                frequency=s_p,
-                frame="NED",
-            ).Q,
-            scalar_first=True,
-        ),
-        "lt": R.from_quat(
-            EKF(
-                gyr=reoriented_gyro["lt"],
-                acc=reoriented_accel["lt"],
-                frequency=s_p,
-                frame="NED",
-            ).Q,
-            scalar_first=True,
-        ),
-        "hip": np.empty(0),
-    }
-    # quats = quats_ekfs
+    if fusion_filter == "madgwick":
+        quats = {
+            "rf": R.from_quat(
+                Madgwick(
+                    reoriented_gyro["rf"],
+                    reoriented_accel["rf"],
+                    frequency=s_p,
+                    gain=madgwick_gain,
+                ).Q,
+                scalar_first=True,
+            ),
+            "lf": R.from_quat(
+                Madgwick(
+                    reoriented_gyro["lf"],
+                    reoriented_accel["lf"],
+                    frequency=s_p,
+                    gain=madgwick_gain,
+                ).Q,
+                scalar_first=True,
+            ),
+            "rt": R.from_quat(
+                Madgwick(
+                    reoriented_gyro["rt"],
+                    reoriented_accel["rt"],
+                    frequency=s_p,
+                    gain=madgwick_gain,
+                ).Q,
+                scalar_first=True,
+            ),
+            "lt": R.from_quat(
+                Madgwick(
+                    reoriented_gyro["lt"],
+                    reoriented_accel["lt"],
+                    frequency=s_p,
+                    gain=madgwick_gain,
+                ).Q,
+                scalar_first=True,
+            ),
+            "hip": np.empty(0),
+        }
+    else:
+        quats = {
+            "rf": R.from_quat(
+                EKF(
+                    gyr=reoriented_gyro["rf"],
+                    acc=reoriented_accel["rf"],
+                    frequency=s_p,
+                    frame="NED",
+                ).Q,
+                scalar_first=True,
+            ),
+            "lf": R.from_quat(
+                EKF(
+                    gyr=reoriented_gyro["lf"],
+                    acc=reoriented_accel["lf"],
+                    frequency=s_p,
+                    frame="NED",
+                ).Q,
+                scalar_first=True,
+            ),
+            "rt": R.from_quat(
+                EKF(
+                    gyr=reoriented_gyro["rt"],
+                    acc=reoriented_accel["rt"],
+                    frequency=s_p,
+                    frame="NED",
+                ).Q,
+                scalar_first=True,
+            ),
+            "lt": R.from_quat(
+                EKF(
+                    gyr=reoriented_gyro["lt"],
+                    acc=reoriented_accel["lt"],
+                    frequency=s_p,
+                    frame="NED",
+                ).Q,
+                scalar_first=True,
+            ),
+            "hip": np.empty(0),
+        }
     for key in quats.keys():
         if key == "hip":
             continue
@@ -450,32 +502,42 @@ def get_orientation(mcd_data) -> dict[str, np.ndarray]:
         # Filtrar para usar solo los momentos de mayor movimiento (fase de oscilación de la marcha)
         magnitudes = np.linalg.norm(gyro_data, axis=1)
         threshold = np.percentile(
-            magnitudes, 70
-        )  # Usar solo el 30% superior de datos más activos
+            magnitudes, pca_percentile
+        )  # Usar solo el (100-pca_percentile)% superior de datos más activos
         movimiento = gyro_data[magnitudes > threshold]
 
         if len(movimiento) > 10:
             # Análisis de Componentes Principales (PCA) mediante matriz de covarianza de NumPy
             cov_matrix = np.cov(movimiento.T)
-            eigenvalues, eigenvectors = np.linalg.eig(cov_matrix)
+            # Asegurar simetría estricta para evitar imprecisiones numéricas que deriven en autovalores complejos
+            cov_matrix = (cov_matrix + cov_matrix.T) / 2.0
 
-            # El eje principal corresponde al mayor autovalor (eje funcional de flexión/extensión)
-            principal_axis = eigenvectors[:, np.argmax(eigenvalues)]
+            if np.isfinite(cov_matrix).all():
+                # Para matrices simétricas reales, eigh garantiza autovalores y autovectores reales
+                eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
 
-            # Proyectar en el plano horizontal (XY) ignorando la gravedad
-            axis_xy = principal_axis[:2]
+                # El eje principal corresponde al mayor autovalor (eje funcional de flexión/extensión)
+                principal_axis = np.real(eigenvectors[:, np.argmax(eigenvalues)])
 
-            if np.linalg.norm(axis_xy) > 1e-6:
-                axis_xy = axis_xy / np.linalg.norm(axis_xy)
+                # Proyectar en el plano horizontal (XY) ignorando la gravedad
+                axis_xy = np.real(principal_axis[:2]).astype(float)
+                norm_xy = np.linalg.norm(axis_xy)
 
-                # Forzar que el vector apunte hacia el lado positivo de Y para evitar giros de 180° por la ambigüedad del PCA
-                if axis_xy[1] < 0:
-                    axis_xy = -axis_xy
+                if np.isfinite(norm_xy) and norm_xy > 1e-6:
+                    axis_xy = axis_xy / norm_xy
 
-                yaw_angle = np.arctan2(axis_xy[1], axis_xy[0])
+                    # Forzar que el vector apunte hacia el lado positivo de Y para evitar giros de 180° por la ambigüedad del PCA
+                    if axis_xy[1] < 0:
+                        axis_xy = -axis_xy
 
-                # Alinear este eje principal (bisagra sagital) para que caiga sobre el eje Y global (pi/2)
-                correction_yaw = (np.pi / 2) - yaw_angle
+                    yaw_angle = float(np.arctan2(axis_xy[1], axis_xy[0]))
+
+                    # Alinear este eje principal (bisagra sagital) para que caiga sobre el eje Y global (pi/2)
+                    correction_yaw = float((np.pi / 2) - yaw_angle)
+                    if not np.isfinite(correction_yaw):
+                        correction_yaw = 0.0
+                else:
+                    correction_yaw = 0.0
             else:
                 correction_yaw = 0.0
         else:
@@ -508,7 +570,7 @@ def get_orientation(mcd_data) -> dict[str, np.ndarray]:
             weight = vel_rf / total_vel
 
         # Limitamos el peso (0.3 a 0.7) para no fusionar la cadera al 100% con un solo fémur y evitar rigidez
-        weight = np.clip(weight, 0.3, 0.7)
+        weight = np.clip(weight, slerp_clip_min, slerp_clip_max)
 
         slerp = Slerp([0, 1], R.concatenate([quats["rf"][i], quats["lf"][i]]))
         hip_quats_list.append(slerp(weight).as_quat())
@@ -524,12 +586,8 @@ def get_orientation(mcd_data) -> dict[str, np.ndarray]:
     #     print(a)
     # plt.plot(rot_r)
     # plt.show()
-    R.from_euler("z", -np.mean(rot_r[:, 0]), degrees=True).as_quat(
-        scalar_first=True
-    )
-    R.from_euler("z", -np.mean(rot_l[:, 0]), degrees=True).as_quat(
-        scalar_first=True
-    )
+    R.from_euler("z", -np.mean(rot_r[:, 0]), degrees=True).as_quat(scalar_first=True)
+    R.from_euler("z", -np.mean(rot_l[:, 0]), degrees=True).as_quat(scalar_first=True)
     # for i in range(len(quats['rf'])):
     #     quats['rf'][i] = multiplicacion(fix_rot_r, quats['rf'][i])
     #     quats['rt'][i] = multiplicacion(fix_rot_r, quats['rt'][i])
@@ -585,7 +643,17 @@ def get_orientation(mcd_data) -> dict[str, np.ndarray]:
     return quats
 
 
-def mcd_reconstruction(mcd_data: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+def mcd_reconstruction(
+    mcd_data: dict[str, np.ndarray],
+    pca_percentile=5,
+    madgwick_gain=0.01,
+    slerp_clip_min=0.3,
+    slerp_clip_max=0.7,
+    calibration_samples=60,
+    fusion_filter="madgwick",
+    pivot_height_threshold=0.01,
+    swing_velocity_threshold=0.5,
+) -> dict[str, np.ndarray]:
     direction = mcd_data["measures"]["direction"]
 
     points = {
@@ -596,7 +664,15 @@ def mcd_reconstruction(mcd_data: dict[str, np.ndarray]) -> dict[str, np.ndarray]
         "knee_l": np.array([0, 0, -mcd_data["measures"]["femur_length"]]),
         "ankle_l": np.array([0, 0, -mcd_data["measures"]["tibia_length"]]),
     }
-    quats = get_orientation(mcd_data)
+    quats = get_orientation(
+        mcd_data,
+        pca_percentile=pca_percentile,
+        madgwick_gain=madgwick_gain,
+        slerp_clip_min=slerp_clip_min,
+        slerp_clip_max=slerp_clip_max,
+        calibration_samples=calibration_samples,
+        fusion_filter=fusion_filter,
+    )
 
     pose = get_all_poses(quats, points)
     # plt.show()
@@ -632,7 +708,7 @@ def mcd_reconstruction(mcd_data: dict[str, np.ndarray]) -> dict[str, np.ndarray]
             mag_gyro_lt = np.linalg.norm(mcd_data["gyro_LT"][i])
 
             # Si la diferencia de altura es obvia (> 1.5 cm), confiamos en la posición
-            if abs(diff_z) > 0.015:
+            if abs(diff_z) > pivot_height_threshold:
                 z_compare = diff_z
             else:
                 # Fase de transición o doble apoyo: pivota la que se mueve menos.
@@ -645,10 +721,10 @@ def mcd_reconstruction(mcd_data: dict[str, np.ndarray]) -> dict[str, np.ndarray]
         # Filtro adicional: Si el supuesto pivote se está balanceando fuertemente hacia adelante,
         # forzamos el cambio al pie opuesto
         if z_compare <= 0:  # Supuesto pivote izquierdo
-            if v_lt > 0.5 and v_lt > v_rt:
+            if v_lt > swing_velocity_threshold and v_lt > v_rt:
                 z_compare = 1
         else:  # Supuesto pivote derecho
-            if v_rt > 0.5 and v_rt > v_lt:
+            if v_rt > swing_velocity_threshold and v_rt > v_lt:
                 z_compare = -1
 
         # traslacion tobillo al origen
@@ -664,7 +740,7 @@ def mcd_reconstruction(mcd_data: dict[str, np.ndarray]) -> dict[str, np.ndarray]
             T_pivot = last_T_al
 
         T_acu = np.linalg.inv(T_a_2_o) @ T_pivot
-        
+
         reconstruction["hip_r"][i] = apply_transformation(T_acu, pose["hip_r"][i])
         reconstruction["hip_l"][i] = apply_transformation(T_acu, pose["hip_l"][i])
         reconstruction["knee_r"][i] = apply_transformation(T_acu, pose["knee_r"][i])
@@ -799,9 +875,149 @@ def measures_calculation(aruco, direction):
     return np.mean(femur_lengths), np.mean(tibia_lengths)
 
 
-def process_files(files: tuple[str, str], use_3d=False) -> any:
+def compute_displacement_velocity(positions, timestamps_ms, trim_ms=1000):
+    """
+    Calcula la velocidad de desplazamiento (m/s) a partir de posiciones 3D y marcas de tiempo.
+    Recorta los períodos quietos al inicio y al final de la captura.
+
+    Args:
+        positions (np.ndarray): Array (N, 3) de posiciones 3D.
+        timestamps_ms (np.ndarray): Array (N,) de marcas de tiempo en milisegundos.
+        trim_ms (float): Milisegundos a recortar al inicio y al final para evitar
+                         períodos estáticos que sesgarían el promedio.
+
+    Returns:
+        dict: Diccionario con:
+            - 'velocities': array de velocidades instantáneas (m/s)
+            - 'timestamps': array de timestamps correspondientes (ms)
+            - 'mean_velocity': velocidad media (m/s)
+            - 'std_velocity': desviación estándar de la velocidad
+            - 'var_velocity': varianza de la velocidad
+    """
+    # Recortar períodos quietos al inicio y al final
+    t_min = timestamps_ms[0] + trim_ms
+    t_max = timestamps_ms[-1] - trim_ms
+    mask = (timestamps_ms >= t_min) & (timestamps_ms <= t_max)
+
+    trimmed_pos = positions[mask]
+    trimmed_t = timestamps_ms[mask]
+
+    if len(trimmed_t) < 2:
+        return {
+            "velocities": np.array([]),
+            "timestamps": np.array([]),
+            "mean_velocity": 0.0,
+            "std_velocity": 0.0,
+            "var_velocity": 0.0,
+        }
+
+    # Diferencia de posición y tiempo
+    dp = np.diff(trimmed_pos, axis=0)  # (N-1, 3)
+    dt = np.diff(trimmed_t) / 1000.0  # convertir ms a segundos, (N-1,)
+
+    # Velocidad instantánea (magnitud del desplazamiento / dt)
+    speeds = np.linalg.norm(dp, axis=1) / dt  # m/s
+
+    # Filtrar velocidades irreales (> 5 m/s para marcha humana)
+    valid = speeds < 5.0
+    speeds = speeds[valid]
+    t_out = trimmed_t[1:][valid]
+
+    return {
+        "velocities": speeds,
+        "timestamps": t_out,
+        "mean_velocity": np.mean(speeds) if len(speeds) > 0 else 0.0,
+        "std_velocity": np.std(speeds) if len(speeds) > 0 else 0.0,
+        "var_velocity": np.var(speeds) if len(speeds) > 0 else 0.0,
+    }
+
+
+def compute_knee_angle(hip_pos, knee_pos, ankle_pos):
+    """
+    Calcula el ángulo de flexión de la rodilla a partir de las posiciones de
+    cadera, rodilla y tobillo.
+
+    Returns:
+        float: Ángulo de flexión de la rodilla en grados (0° = extendida).
+    """
+    vec_femur = hip_pos - knee_pos
+    vec_tibia = ankle_pos - knee_pos
+    norm_f = np.linalg.norm(vec_femur)
+    norm_t = np.linalg.norm(vec_tibia)
+    if norm_f < 1e-10 or norm_t < 1e-10:
+        return 0.0
+    cos_angle = np.dot(vec_femur, vec_tibia) / (norm_f * norm_t)
+    cos_angle = np.clip(cos_angle, -1.0, 1.0)
+    return 180.0 - np.degrees(np.arccos(cos_angle))
+
+
+def compute_knee_angles_series(hip_pos, knee_pos, ankle_pos):
+    """Calcula la serie temporal de ángulos de rodilla en grados."""
+    n = min(len(hip_pos), len(knee_pos), len(ankle_pos))
+    return np.array(
+        [compute_knee_angle(hip_pos[i], knee_pos[i], ankle_pos[i]) for i in range(n)]
+    )
+
+
+def detect_stride_lengths(
+    ankle_positions, timestamps_ms, min_distance_samples=50, prominence=0.005
+):
+    """
+    Detecta longitudes de zancada a partir de heel strikes (mínimos en Z del tobillo).
+
+    Args:
+        ankle_positions (np.ndarray): Posiciones del tobillo (N, 3).
+        timestamps_ms (np.ndarray): Marcas de tiempo en ms.
+        min_distance_samples (int): Distancia mínima entre picos en muestras.
+        prominence (float): Prominencia mínima para detectar un heel strike.
+
+    Returns:
+        tuple: (stride_lengths_m, stride_times_ms)
+    """
+    z = ankle_positions[:, 2]
+    # Heel strikes = mínimos en Z → invertir para usar find_peaks
+    neg_z = -z
+    peaks, _ = find_peaks(neg_z, distance=min_distance_samples, prominence=prominence)
+
+    if len(peaks) < 2:
+        return np.array([]), np.array([])
+
+    stride_lengths = []
+    stride_times = []
+    # Cada par consecutivo de heel strikes del mismo pie = 1 zancada
+    # Usamos pares alternos (i, i+2) para zancadas del mismo pie
+    for i in range(len(peaks) - 2):
+        p1 = ankle_positions[peaks[i]]
+        p2 = ankle_positions[peaks[i + 2]]
+        # Distancia horizontal (X-Y) entre heel strikes del mismo pie
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        stride_len = np.sqrt(dx**2 + dy**2)
+        if stride_len > 0.1 and stride_len < 3.0:  # Filtrar valores irreales
+            stride_lengths.append(stride_len)
+            stride_times.append(timestamps_ms[peaks[i]])
+
+    return np.array(stride_lengths), np.array(stride_times)
+
+
+def process_files(
+    files: tuple[str, str],
+    use_3d=False,
+    cutoff_freq=7,
+    filter_order=6,
+    pca_percentile=5,
+    madgwick_gain=0.01,
+    slerp_clip_min=0.3,
+    slerp_clip_max=0.7,
+    calibration_samples=60,
+    fusion_filter="madgwick",
+    pivot_height_threshold=0.01,
+    swing_velocity_threshold=0.5,
+) -> any:
     # Lee los datos de los archivos MCD (sensores inerciales) y ArUco (ground truth).
-    mcd_data = read_mcd_file(files[0])
+    mcd_data = read_mcd_file(
+        files[0], cutoff_freq=cutoff_freq, filter_order=filter_order
+    )
     aruco_data = read_aruco_file(files[1])
 
     # Determina la dirección de la marcha y la pierna que no se ve (oculta).
@@ -839,10 +1055,24 @@ def process_files(files: tuple[str, str], use_3d=False) -> any:
     # Actualiza las medidas en los datos del MCD con las longitudes calculadas.
     mcd_data["measures"]["femur_length"] = femur_length
     mcd_data["measures"]["tibia_length"] = tibia_length
-    mcd_data["measures"]["hip_width"] = 0.01
+    if (
+        "hip_width" not in mcd_data["measures"]
+        or mcd_data["measures"]["hip_width"] <= 0.05
+    ):
+        mcd_data["measures"]["hip_width"] = 0.25
 
     # Realiza la reconstrucción del esqueleto a partir de los datos de los sensores inerciales.
-    reconstruction = mcd_reconstruction(mcd_data)
+    reconstruction = mcd_reconstruction(
+        mcd_data,
+        pca_percentile=pca_percentile,
+        madgwick_gain=madgwick_gain,
+        slerp_clip_min=slerp_clip_min,
+        slerp_clip_max=slerp_clip_max,
+        calibration_samples=calibration_samples,
+        fusion_filter=fusion_filter,
+        pivot_height_threshold=pivot_height_threshold,
+        swing_velocity_threshold=swing_velocity_threshold,
+    )
     # reconstruction = mcd_reconstruction_are(mcd_data)
     # Define un ángulo de rotación objetivo para alinear la reconstrucción con el sistema de coordenadas global.
     z_target = 0 if direction == "L" else np.pi
@@ -857,7 +1087,8 @@ def process_files(files: tuple[str, str], use_3d=False) -> any:
             T_fix, reconstruction["hip_l"][i]
         )
         reconstruction["knee_r"][i] = apply_transformation(
-            T_fix, reconstruction["knee_r"][i])
+            T_fix, reconstruction["knee_r"][i]
+        )
         reconstruction["knee_l"][i] = apply_transformation(
             T_fix, reconstruction["knee_l"][i]
         )
@@ -1047,7 +1278,7 @@ def process_files(files: tuple[str, str], use_3d=False) -> any:
             dpi=300,
             bbox_inches="tight",
         )
-    #"""
+    # """
 
     # plt.plot(sorted(common_time), gen_eucliden_error,
     #          label='General Euclidean Error')
@@ -1113,16 +1344,179 @@ def process_files(files: tuple[str, str], use_3d=False) -> any:
 
     # print(np.mean(axis_error, axis=0))
 
-    # plt.show()
-    # return np.mean(five_points, axis=0).mean()
+    # --- Cálculo de velocidad de desplazamiento ---
+    velocity_data = {}
+
+    # Velocidad desde los marcadores ArUco (ground truth)
+    aruco_hip_key = "hip_r"
+    if aruco_hip_key in aruco_processed:
+        aruco_hip_t = aruco_processed[aruco_hip_key]["time"].astype(float)
+        aruco_hip_pos = aruco_processed[aruco_hip_key]["data"]
+        velocity_data["aruco_hip"] = compute_displacement_velocity(
+            aruco_hip_pos, aruco_hip_t, trim_ms=1000
+        )
+
+    rec_hip_pos = (reconstruction["hip_r"] + reconstruction["hip_l"]) / 2.0
+    velocity_data["reconstruction_hip"] = compute_displacement_velocity(
+        rec_hip_pos, mcd_data["time"], trim_ms=1000
+    )
+
+    for side in ["r", "l"]:
+        ankle_key = f"ankle_{side}"
+        if ankle_key in aruco_processed:
+            a_t = aruco_processed[ankle_key]["time"].astype(float)
+            a_pos = aruco_processed[ankle_key]["data"]
+            velocity_data[f"aruco_{ankle_key}"] = compute_displacement_velocity(
+                a_pos, a_t, trim_ms=1000
+            )
+        velocity_data[f"reconstruction_{ankle_key}"] = compute_displacement_velocity(
+            reconstruction[ankle_key], mcd_data["time"], trim_ms=1000
+        )
+
+    # =====================================================================
+    # MÉTRICAS CIENTÍFICAS ADICIONALES
+    # =====================================================================
+    extra_metrics = {}
+
+    # --- 1. RMSE por articulación ---
+    rmse_per_joint = {}
+    for key in homogeneous_data.keys():
+        diff = homogeneous_data[key]["mcd"] - homogeneous_data[key]["aruco"]
+        rmse = np.sqrt(np.mean(diff**2))
+        rmse_per_joint[key] = rmse
+    extra_metrics["rmse_per_joint"] = rmse_per_joint
+    extra_metrics["rmse_mean"] = np.mean(list(rmse_per_joint.values()))
+
+    # --- 2. Correlación de Pearson por eje ---
+    pearson_per_joint = {}
+    axis_labels = ["X", "Y", "Z"]
+    for key in homogeneous_data.keys():
+        joint_corr = {}
+        for ax_i, ax_name in enumerate(axis_labels):
+            mcd_ax = homogeneous_data[key]["mcd"][:, ax_i]
+            aruco_ax = homogeneous_data[key]["aruco"][:, ax_i]
+            if np.std(mcd_ax) > 1e-10 and np.std(aruco_ax) > 1e-10:
+                r_val, p_val = pearsonr(mcd_ax, aruco_ax)
+            else:
+                r_val, p_val = 0.0, 1.0
+            joint_corr[ax_name] = {"r": r_val, "p_value": p_val}
+        pearson_per_joint[key] = joint_corr
+    extra_metrics["pearson_per_joint"] = pearson_per_joint
+
+    # --- 3. Datos para Bland-Altman (promedio general de posición) ---
+    bland_altman = {}
+    for ax_i, ax_name in enumerate(axis_labels):
+        all_mcd_ax = np.concatenate(
+            [homogeneous_data[key]["mcd"][:, ax_i] for key in homogeneous_data.keys()]
+        )
+        all_aruco_ax = np.concatenate(
+            [homogeneous_data[key]["aruco"][:, ax_i] for key in homogeneous_data.keys()]
+        )
+        mean_vals = (all_mcd_ax + all_aruco_ax) / 2.0
+        diff_vals = all_mcd_ax - all_aruco_ax
+        bland_altman[ax_name] = {
+            "mean": mean_vals,
+            "diff": diff_vals,
+            "bias": np.mean(diff_vals),
+            "std_diff": np.std(diff_vals),
+            "upper_loa": np.mean(diff_vals) + 1.96 * np.std(diff_vals),
+            "lower_loa": np.mean(diff_vals) - 1.96 * np.std(diff_vals),
+        }
+    extra_metrics["bland_altman"] = bland_altman
+
+    # --- 4. Longitud de zancada ---
+    stride_data = {}
+    for side in ["r", "l"]:
+        ankle_key = f"ankle_{side}"
+        # Desde la reconstrucción
+        rec_strides, rec_stride_t = detect_stride_lengths(
+            reconstruction[ankle_key], mcd_data["time"]
+        )
+        stride_data[f"reconstruction_{ankle_key}"] = {
+            "lengths": rec_strides,
+            "times": rec_stride_t,
+            "mean": np.mean(rec_strides) if len(rec_strides) > 0 else 0.0,
+            "std": np.std(rec_strides) if len(rec_strides) > 0 else 0.0,
+        }
+        # Desde ArUco
+        if ankle_key in aruco_processed:
+            aruco_ankle_pos = aruco_processed[ankle_key]["data"]
+            aruco_ankle_t = aruco_processed[ankle_key]["time"].astype(float)
+            aruco_strides, aruco_stride_t = detect_stride_lengths(
+                aruco_ankle_pos, aruco_ankle_t
+            )
+            stride_data[f"aruco_{ankle_key}"] = {
+                "lengths": aruco_strides,
+                "times": aruco_stride_t,
+                "mean": np.mean(aruco_strides) if len(aruco_strides) > 0 else 0.0,
+                "std": np.std(aruco_strides) if len(aruco_strides) > 0 else 0.0,
+            }
+    extra_metrics["stride_data"] = stride_data
+
+    # --- 5. ROM de rodilla (Range of Motion) ---
+    knee_rom = {}
+    for side in ["r", "l"]:
+        hip_key = f"hip_{side}"
+        knee_key = f"knee_{side}"
+        ankle_key = f"ankle_{side}"
+
+        # ROM desde la reconstrucción
+        rec_knee_angles = compute_knee_angles_series(
+            reconstruction[hip_key], reconstruction[knee_key], reconstruction[ankle_key]
+        )
+        knee_rom[f"reconstruction_{side}"] = {
+            "angles": rec_knee_angles,
+            "rom": np.max(rec_knee_angles) - np.min(rec_knee_angles),
+            "max": np.max(rec_knee_angles),
+            "min": np.min(rec_knee_angles),
+            "mean": np.mean(rec_knee_angles),
+        }
+
+        # ROM desde ArUco (si hay datos sincronizados)
+        if knee_key in homogeneous_data:
+            aruco_knee_angles = compute_knee_angles_series(
+                (
+                    homogeneous_data[hip_key]["aruco"]
+                    if hip_key in homogeneous_data
+                    else homogeneous_data[f"hip_{direction.lower()}"]["aruco"]
+                ),
+                homogeneous_data[knee_key]["aruco"],
+                homogeneous_data[ankle_key]["aruco"],
+            )
+            mcd_knee_angles = compute_knee_angles_series(
+                (
+                    homogeneous_data[hip_key]["mcd"]
+                    if hip_key in homogeneous_data
+                    else homogeneous_data[f"hip_{direction.lower()}"]["mcd"]
+                ),
+                homogeneous_data[knee_key]["mcd"],
+                homogeneous_data[ankle_key]["mcd"],
+            )
+            knee_rom[f"aruco_{side}"] = {
+                "angles": aruco_knee_angles,
+                "rom": np.max(aruco_knee_angles) - np.min(aruco_knee_angles),
+                "max": np.max(aruco_knee_angles),
+                "min": np.min(aruco_knee_angles),
+                "mean": np.mean(aruco_knee_angles),
+            }
+            knee_rom[f"homogeneous_mcd_{side}"] = {
+                "angles": mcd_knee_angles,
+                "rom": np.max(mcd_knee_angles) - np.min(mcd_knee_angles),
+                "max": np.max(mcd_knee_angles),
+                "min": np.min(mcd_knee_angles),
+                "mean": np.mean(mcd_knee_angles),
+            }
+    extra_metrics["knee_rom"] = knee_rom
+
     # Devuelve los resultados del procesamiento.
-    # print(type(homogeneous_data))
     return (
         gen_eucliden_error,
         sorted(list(common_time)),
         reconstruction,
         aruco_processed,
         homogeneous_data,
+        velocity_data,
+        extra_metrics,
     )
 
 
@@ -1181,66 +1575,331 @@ def animation(rec, aruco, title):
             break
 
 
-if __name__ == "__main__":    
+if __name__ == "__main__":
     files = get_dataset()
     if len(files) == 0:
         print("No files selected")
         exit(1)
-    # print(f'capture | x_r | x_p-value | y_r | y_p-value | z_r | z_p-value')
-    
+
     target_files = [f for f in files if f[0].split(split_char)[-2] != "0"]
- 
+
+    print(f"\n  📂 Procesando {len(target_files)} capturas con multiprocessing...")
+    t_start = time.time()
+
     with Pool() as pool:
         raw_results = pool.map(process_files, target_files)
-        
-    valid_data = [(f, err) for f, err in zip(target_files, raw_results) if err is not None]
-    target_files = [f for f, err in valid_data]
-    gen_errors = [err for f, err in valid_data]
-    # print(type(gen_errors[-1]))
-    # print(type(gen_errors[0][-1]))
+
+    elapsed = time.time() - t_start
+
+    valid_data = [
+        (f, res) for f, res in zip(target_files, raw_results) if res is not None
+    ]
+    target_files = [f for f, res in valid_data]
+    gen_errors = [res for f, res in valid_data]
+
     mean_error_per_point = np.empty(0)
     for file in gen_errors:
+        homogeneous = file[4]
         mean_error_per_point = np.append(
             mean_error_per_point,
-            np.mean([file[-1][key]["euclidean_mean"] for key in file[-1].keys()]),
+            np.mean([homogeneous[key]["euclidean_mean"] for key in homogeneous.keys()]),
         )
-    # print(len(mean_error_per_point))
 
     gen_mean_error = np.array([np.mean(err[0]) for err in gen_errors])
-    # print("voluntario/captura;mean;max;min")
-    # for i in range(len(files)):
-    #     file = "/".join(files[i][0].split(split_char)[-2:])
-    #     print(
-    #         f"{file};{gen_mean_error[i]:.4f};{np.max(gen_errors[i][0]):.4f};{np.min(gen_errors[i][0]):.4f}"
-    #     )
-
-    print(f"General mean error: {np.mean(gen_mean_error)}")
-    print(f"General variance: {np.var(gen_mean_error)}")
-    print(f"General standard deviation: {np.std(gen_mean_error)}")
-    print(f"General minimum: {np.min(gen_mean_error)}")
-    print(f"General maximum: {np.max(gen_mean_error)}")
-    print("---")
-    print(f"mean: {np.mean(mean_error_per_point)}")
-    print(f"std: {np.std(mean_error_per_point)}")
-    print(f"min: {np.min(mean_error_per_point)}")
-    print(f"max: {np.max(mean_error_per_point)}")
-    # for err in gen_errors:
-    #     animation(err[2], err[3], "")
 
     best_idx = np.argmin(gen_mean_error)
     worst_idx = np.argmax(gen_mean_error)
     mean_idx = np.argmin(np.abs(gen_mean_error - np.mean(gen_mean_error)))
-    # print(f"Best: {gen_mean_error[best_idx]}")
-    # print(f"Worst: {gen_mean_error[worst_idx]}")
-    # print(f"Mean: {gen_mean_error[mean_idx]}")
 
-    # for err in np.sort(gen_mean_error):
-    # print(err)
+    # ─────────────────────────────────────────────────────────────────────
+    #  IMPRESIÓN DE RESULTADOS
+    # ─────────────────────────────────────────────────────────────────────
 
-    # print(means)
+    W = 72  # ancho de las cajas
+
+    print()
+    print("═" * W)
+    print("  RESUMEN DEL DATASET")
+    print("═" * W)
+    print(
+        f"  Capturas procesadas:       {len(gen_errors)} / {len(target_files) + (len(raw_results) - len(gen_errors))}"
+    )
+    print(f"  Capturas válidas:          {len(gen_errors)}")
+    print(f"  Tiempo de procesamiento:   {elapsed:.1f} s")
+    print("═" * W)
+
+    # ── 1. Error Euclidiano General ──────────────────────────────────────
+    print()
+    print("═" * W)
+    print("  📊 ERROR EUCLIDIANO GENERAL (centroide de 5 articulaciones)")
+    print("═" * W)
+    print(f"  Error medio:               {np.mean(gen_mean_error):.6f} m")
+    print(f"  Desviación estándar:       {np.std(gen_mean_error):.6f} m")
+    print(f"  Varianza:                  {np.var(gen_mean_error):.6f} m²")
+    print(f"  Mínimo:                    {np.min(gen_mean_error):.6f} m")
+    print(f"  Máximo:                    {np.max(gen_mean_error):.6f} m")
+    print(
+        f"  Rango:                     {np.max(gen_mean_error) - np.min(gen_mean_error):.6f} m"
+    )
+    print("─" * W)
+    print(f"  📐 Error medio por punto (promedio por articulación):")
+    print(f"  Media:                     {np.mean(mean_error_per_point):.6f} m")
+    print(f"  Desviación estándar:       {np.std(mean_error_per_point):.6f} m")
+    print(f"  Mínimo:                    {np.min(mean_error_per_point):.6f} m")
+    print(f"  Máximo:                    {np.max(mean_error_per_point):.6f} m")
+    print("═" * W)
+
+    # ── 2. Capturas destacadas ───────────────────────────────────────────
+    print()
+    print("═" * W)
+    print("  🏆 CAPTURAS DESTACADAS")
+    print("═" * W)
+    for label, idx, icon in [
+        ("Mejor", best_idx, "🟢"),
+        ("Peor", worst_idx, "🔴"),
+        ("Promedio", mean_idx, "🔵"),
+    ]:
+        file_label = "/".join(target_files[idx][0].split(split_char)[-2:])
+        print(
+            f"  {icon} {label + ':':<12} {file_label:<30} error = {gen_mean_error[idx]:.6f} m"
+        )
+    print("═" * W)
+
+    # ── 3. Error por sujeto ──────────────────────────────────────────────
+    errors_by_subject = {}
+    for f, err in zip(target_files, gen_errors):
+        subject = f[0].split(split_char)[-2]
+        if subject not in errors_by_subject:
+            errors_by_subject[subject] = []
+        errors_by_subject[subject].extend(err[0])
+
+    subjects = sorted(
+        errors_by_subject.keys(), key=lambda x: int(x) if x.isdigit() else x
+    )
+
+    print()
+    print("═" * W)
+    print("  📋 ERROR POR SUJETO")
+    print("═" * W)
+    print(
+        f"  {'Sujeto':>8}  {'Media (m)':>12}  {'Std (m)':>12}  {'Mín (m)':>12}  {'Máx (m)':>12}"
+    )
+    print(f"  {'─'*8}  {'─'*12}  {'─'*12}  {'─'*12}  {'─'*12}")
+    for s in subjects:
+        vals = np.array(errors_by_subject[s])
+        print(
+            f"  {s:>8}  {np.mean(vals):>12.6f}  {np.std(vals):>12.6f}  {np.min(vals):>12.6f}  {np.max(vals):>12.6f}"
+        )
+    print("═" * W)
+
+    # ── 4. Velocidad de desplazamiento ───────────────────────────────────
+    rec_hip_velocities = []
+    aruco_hip_velocities = []
+    for err in gen_errors:
+        vel_data = err[5]
+        rec_hip_velocities.append(
+            vel_data.get("reconstruction_hip", {}).get("mean_velocity", 0.0)
+        )
+        aruco_hip_velocities.append(
+            vel_data.get("aruco_hip", {}).get("mean_velocity", 0.0)
+        )
+    rec_hip_velocities = np.array(rec_hip_velocities)
+    aruco_hip_velocities = np.array(aruco_hip_velocities)
+
+    print()
+    print("═" * W)
+    print("  🚶 VELOCIDAD DE DESPLAZAMIENTO (cadera)")
+    print("═" * W)
+    print(f"  {'':30}  {'Reconstrucción':>16}  {'ArUco (GT)':>16}")
+    print(f"  {'─'*30}  {'─'*16}  {'─'*16}")
+    print(
+        f"  {'Velocidad media (m/s)':30}  {np.mean(rec_hip_velocities):>16.4f}  {np.mean(aruco_hip_velocities):>16.4f}"
+    )
+    print(
+        f"  {'± Desv. estándar (m/s)':30}  {np.std(rec_hip_velocities):>16.4f}  {np.std(aruco_hip_velocities):>16.4f}"
+    )
+    print(
+        f"  {'Mínima (m/s)':30}  {np.min(rec_hip_velocities):>16.4f}  {np.min(aruco_hip_velocities):>16.4f}"
+    )
+    print(
+        f"  {'Máxima (m/s)':30}  {np.max(rec_hip_velocities):>16.4f}  {np.max(aruco_hip_velocities):>16.4f}"
+    )
+
+    # Velocidad por sujeto
+    vel_by_subject_rec = {}
+    vel_by_subject_aruco = {}
+    for i, f in enumerate(target_files):
+        subject = f[0].split(split_char)[-2]
+        if subject not in vel_by_subject_rec:
+            vel_by_subject_rec[subject] = []
+            vel_by_subject_aruco[subject] = []
+        vel_by_subject_rec[subject].append(rec_hip_velocities[i])
+        vel_by_subject_aruco[subject].append(aruco_hip_velocities[i])
+
+    print()
+    print(f"  Velocidad media por sujeto:")
+    print(f"  {'Sujeto':>8}  {'Rec. (m/s)':>14}  {'ArUco (m/s)':>14}")
+    print(f"  {'─'*8}  {'─'*14}  {'─'*14}")
+    for s in sorted(
+        vel_by_subject_rec.keys(), key=lambda x: int(x) if x.isdigit() else x
+    ):
+        print(
+            f"  {s:>8}  {np.mean(vel_by_subject_rec[s]):>14.4f}  {np.mean(vel_by_subject_aruco[s]):>14.4f}"
+        )
+    print("═" * W)
+
+    # ── 5. Métricas científicas ──────────────────────────────────────────
+    all_rmse_means = [err[6]["rmse_mean"] for err in gen_errors]
+    all_rmse_per_joint = {}
+    for err in gen_errors:
+        for joint, rmse_val in err[6]["rmse_per_joint"].items():
+            if joint not in all_rmse_per_joint:
+                all_rmse_per_joint[joint] = []
+            all_rmse_per_joint[joint].append(rmse_val)
+
+    axis_labels = ["X", "Y", "Z"]
+    pearson_all = {ax: {"r_vals": [], "p_vals": []} for ax in axis_labels}
+    pearson_by_joint = {}
+    for err in gen_errors:
+        for joint, corr_data in err[6]["pearson_per_joint"].items():
+            if joint not in pearson_by_joint:
+                pearson_by_joint[joint] = {ax: [] for ax in axis_labels}
+            for ax in axis_labels:
+                r_val = corr_data[ax]["r"]
+                pearson_by_joint[joint][ax].append(r_val)
+                pearson_all[ax]["r_vals"].append(r_val)
+                pearson_all[ax]["p_vals"].append(corr_data[ax]["p_value"])
+
+    print()
+    print("═" * W)
+    print("  🔬 MÉTRICAS CIENTÍFICAS")
+    print("═" * W)
+
+    # 5a. RMSE
+    print()
+    print(f"  1) RMSE (Root Mean Square Error)")
+    print(f"  {'─'*40}")
+    print(
+        f"     RMSE general:  {np.mean(all_rmse_means):.4f} ± {np.std(all_rmse_means):.4f} m"
+    )
+    print()
+    print(f"     {'Articulación':<12}  {'RMSE (m)':>12}")
+    print(f"     {'─'*12}  {'─'*12}")
+    for joint in sorted(all_rmse_per_joint.keys()):
+        vals = np.array(all_rmse_per_joint[joint])
+        print(f"     {joint:<12}  {np.mean(vals):.4f} ± {np.std(vals):.4f}")
+
+    # 5b. Pearson
+    print()
+    print(f"  2) Correlación de Pearson")
+    print(f"  {'─'*40}")
+    print(f"     Promedio general:")
+    for ax in axis_labels:
+        r_mean = np.mean(pearson_all[ax]["r_vals"])
+        r_std = np.std(pearson_all[ax]["r_vals"])
+        print(f"       Eje {ax}:  r = {r_mean:.4f} ± {r_std:.4f}")
+    print()
+    print(f"     {'Articulación':<12}  {'r_X':>8}  {'r_Y':>8}  {'r_Z':>8}")
+    print(f"     {'─'*12}  {'─'*8}  {'─'*8}  {'─'*8}")
+    for joint in sorted(pearson_by_joint.keys()):
+        rx = np.mean(pearson_by_joint[joint]["X"])
+        ry = np.mean(pearson_by_joint[joint]["Y"])
+        rz = np.mean(pearson_by_joint[joint]["Z"])
+        print(f"     {joint:<12}  {rx:>8.4f}  {ry:>8.4f}  {rz:>8.4f}")
+
+    # 5c. Bland-Altman
+    ba_data = gen_errors[mean_idx][6]["bland_altman"]
+    ba_agg = {ax: {"bias": [], "upper": [], "lower": []} for ax in axis_labels}
+    for err in gen_errors:
+        for ax in axis_labels:
+            ba = err[6]["bland_altman"][ax]
+            ba_agg[ax]["bias"].append(ba["bias"])
+            ba_agg[ax]["upper"].append(ba["upper_loa"])
+            ba_agg[ax]["lower"].append(ba["lower_loa"])
+
+    print()
+    print(f"  3) Bland-Altman")
+    print(f"  {'─'*40}")
+    print(f"     Captura promedio:")
+    for ax in axis_labels:
+        ba = ba_data[ax]
+        print(
+            f"       Eje {ax}:  Sesgo = {ba['bias']:.4f} m,  LoA = [{ba['lower_loa']:.4f}, {ba['upper_loa']:.4f}] m"
+        )
+    print(f"     Agregado (todas las capturas):")
+    for ax in axis_labels:
+        print(
+            f"       Eje {ax}:  Sesgo = {np.mean(ba_agg[ax]['bias']):.4f} ± {np.std(ba_agg[ax]['bias']):.4f} m"
+        )
+
+    # 5d. Longitud de zancada
+    rec_stride_all = []
+    aruco_stride_all = []
+    for err in gen_errors:
+        sd = err[6]["stride_data"]
+        for side in ["r", "l"]:
+            rec_key = f"reconstruction_ankle_{side}"
+            aruco_key = f"aruco_ankle_{side}"
+            if rec_key in sd and len(sd[rec_key]["lengths"]) > 0:
+                rec_stride_all.extend(sd[rec_key]["lengths"])
+            if aruco_key in sd and len(sd[aruco_key]["lengths"]) > 0:
+                aruco_stride_all.extend(sd[aruco_key]["lengths"])
+    rec_stride_all = np.array(rec_stride_all)
+    aruco_stride_all = np.array(aruco_stride_all)
+
+    print()
+    print(f"  4) Longitud de zancada")
+    print(f"  {'─'*40}")
+    if len(rec_stride_all) > 0:
+        print(
+            f"     Reconstrucción:  {np.mean(rec_stride_all):.4f} ± {np.std(rec_stride_all):.4f} m  (n={len(rec_stride_all)})"
+        )
+    else:
+        print(f"     Reconstrucción:  No se detectaron zancadas")
+    if len(aruco_stride_all) > 0:
+        print(
+            f"     ArUco (GT):      {np.mean(aruco_stride_all):.4f} ± {np.std(aruco_stride_all):.4f} m  (n={len(aruco_stride_all)})"
+        )
+    else:
+        print(f"     ArUco (GT):      No se detectaron zancadas")
+
+    # 5e. ROM de rodilla
+    rom_rec_all = []
+    rom_aruco_all = []
+    for err in gen_errors:
+        kr = err[6]["knee_rom"]
+        for side in ["r", "l"]:
+            if f"reconstruction_{side}" in kr:
+                rom_rec_all.append(kr[f"reconstruction_{side}"]["rom"])
+            if f"aruco_{side}" in kr:
+                rom_aruco_all.append(kr[f"aruco_{side}"]["rom"])
+    rom_rec_all = np.array(rom_rec_all) if rom_rec_all else np.array([0.0])
+    rom_aruco_all = np.array(rom_aruco_all) if rom_aruco_all else np.array([0.0])
+
+    print()
+    print(f"  5) ROM de rodilla (Range of Motion)")
+    print(f"  {'─'*40}")
+    print(
+        f"     Reconstrucción:  {np.mean(rom_rec_all):.2f} ± {np.std(rom_rec_all):.2f}°"
+    )
+    print(
+        f"     ArUco (GT):      {np.mean(rom_aruco_all):.2f} ± {np.std(rom_aruco_all):.2f}°"
+    )
+    if len(rom_rec_all) > 0 and len(rom_aruco_all) > 0:
+        rom_diff = np.mean(rom_rec_all) - np.mean(rom_aruco_all)
+        print(f"     Diferencia:      {rom_diff:+.2f}°")
+    print()
+    print("═" * W)
+
+    # ─────────────────────────────────────────────────────────────────────
+    #  GRÁFICAS
+    # ─────────────────────────────────────────────────────────────────────
+
+    print()
+    print("  🎨 Generando gráficas...")
+
+    # Error temporal: mejor, peor, promedio
     fig_best, ax_best = plt.subplots(1, 1, figsize=figsize)
-    fig_worst, ax_worst = plt.subplots(1, 1, figsize=figsize)
-    fig_mean, ax_mean = plt.subplots(1, 1, figsize=figsize)
     ax_best.plot(
         gen_errors[best_idx][1],
         gen_errors[best_idx][0],
@@ -1250,8 +1909,10 @@ if __name__ == "__main__":
     ax_best.set_title("Best error")
     ax_best.set_xlabel("Time (ms)")
     ax_best.set_ylabel("Euclidean error (m)")
-    ax_best.grid(1)
+    ax_best.grid(True)
     ax_best.set_ylim(0, 1)
+
+    fig_worst, ax_worst = plt.subplots(1, 1, figsize=figsize)
     ax_worst.plot(
         gen_errors[worst_idx][1],
         gen_errors[worst_idx][0],
@@ -1261,8 +1922,10 @@ if __name__ == "__main__":
     ax_worst.set_title("Worst error")
     ax_worst.set_xlabel("Time (ms)")
     ax_worst.set_ylabel("Euclidean error (m)")
-    ax_worst.grid(1)
+    ax_worst.grid(True)
     ax_worst.set_ylim(0, 1)
+
+    fig_mean, ax_mean = plt.subplots(1, 1, figsize=figsize)
     ax_mean.plot(
         gen_errors[mean_idx][1],
         gen_errors[mean_idx][0],
@@ -1272,123 +1935,162 @@ if __name__ == "__main__":
     ax_mean.set_title("Average error")
     ax_mean.set_xlabel("Time (ms)")
     ax_mean.set_ylabel("Euclidean error (m)")
-    ax_mean.grid(1)
+    ax_mean.grid(True)
     ax_mean.set_ylim(0, 1)
 
+    # Todos los errores superpuestos
     all_fig, all_ax = plt.subplots(1, 1, figsize=figsize)
     for i, (err, t, *_) in enumerate(gen_errors):
         all_ax.plot(t, err, label=f"File {i+1}")
     all_ax.set_title("All errors")
     all_ax.set_xlabel("Time (ms)")
     all_ax.set_ylabel("Euclidean error (m)")
-    all_ax.grid(1)
+    all_ax.grid(True)
     all_ax.set_ylim(0, 1)
 
-    # Gráfica de Boxplot por sujeto
-    errors_by_subject = {}
-    for f, err in zip(target_files, gen_errors):
-        subject = f[0].split(split_char)[-2]
-        if subject not in errors_by_subject:
-            errors_by_subject[subject] = []
-        errors_by_subject[subject].extend(err[0])
-
-    fig_box, ax_box = plt.subplots(figsize=figsize)
-    subjects = sorted(
-        errors_by_subject.keys(), key=lambda x: int(x) if x.isdigit() else x
-    )
+    # Boxplot por sujeto
     data_to_plot = [errors_by_subject[s] for s in subjects]
+    fig_box, ax_box = plt.subplots(figsize=figsize)
     ax_box.boxplot(data_to_plot, labels=subjects)
     ax_box.set_title("Euclidean Error Distribution by Subject")
     ax_box.set_xlabel("Subject / Volunteer")
     ax_box.set_ylabel("Euclidean Error (m)")
     ax_box.grid(True)
     ax_box.set_ylim(0, 0.8)
+    fig_box.savefig("Results/boxplot_error.png", dpi=300, bbox_inches="tight")
+    print("  ✓ Results/boxplot_error.png")
 
-    # fig_best.savefig(
-    #     "Results/best_error.png",
-    #     dpi=300,
-    #     bbox_inches="tight",
-    # )
-    # fig_mean.savefig(
-    #     "Results/mean_error.png",
-    #     dpi=300,
-    #     bbox_inches="tight",
-    # )
-    # fig_worst.savefig(
-    #     "Results/worst_error.png",
-    #     dpi=300,
-    #     bbox_inches="tight",
-    # )
-    fig_box.savefig(
-        "Results/boxplot_error.png",
-        dpi=300,
-        bbox_inches="tight",
-    )
-    # all_fig.savefig(
-    #     "Results/all_errors.png",
-    #     dpi=300,
-    #     bbox_inches="tight",
-    # )
+    # Velocidad: mejor, peor, promedio, todas
+    for tag, idx in [("best", best_idx), ("worst", worst_idx), ("mean", mean_idx)]:
+        vel = gen_errors[idx][5]
+        fig_v, ax_v = plt.subplots(1, 1, figsize=figsize)
+        if (
+            "reconstruction_hip" in vel
+            and len(vel["reconstruction_hip"]["velocities"]) > 0
+        ):
+            ax_v.plot(
+                vel["reconstruction_hip"]["timestamps"] / 1000.0,
+                vel["reconstruction_hip"]["velocities"],
+                label="Reconstrucción (cadera)",
+                color="blue",
+                alpha=0.7,
+                linewidth=0.8,
+            )
+        if "aruco_hip" in vel and len(vel["aruco_hip"]["velocities"]) > 0:
+            ax_v.plot(
+                vel["aruco_hip"]["timestamps"] / 1000.0,
+                vel["aruco_hip"]["velocities"],
+                label="ArUco (cadera)",
+                color="red",
+                alpha=0.7,
+                linewidth=0.8,
+            )
+        ax_v.set_title(f"Velocidad de desplazamiento – {tag.capitalize()}")
+        ax_v.set_xlabel("Tiempo (s)")
+        ax_v.set_ylabel("Velocidad (m/s)")
+        ax_v.legend()
+        ax_v.grid(True)
+        ax_v.set_ylim(0, 3)
+        fig_v.savefig(f"Results/velocity_{tag}.png", dpi=300, bbox_inches="tight")
+        print(f"  ✓ Results/velocity_{tag}.png")
 
-    # fig3, ax3 = plt.subplots(1, 1, figsize=figsize)
-    # ax3.plot(gen_errors[mean_idx][1], gen_errors[mean_idx][0],
-    #          label='Mean error', color='blue')
-    # ax3.plot(gen_errors[best_idx][1], gen_errors[best_idx][0],
-    #          label='Best error', color='green')
-    # ax3.plot(gen_errors[worst_idx][1], gen_errors[worst_idx][0],
-    #          label='Worst error', color='red')
-    # ax3.set_title('Mean, Best and Worst errors')
-    # ax3.set_xlabel('Time (ms)')
-    # ax3.set_ylabel('Euclidean error (m)')
-    # ax3.grid(1)
-    # ax3.set_ylim(0, 1)
-    # ax3.legend()
-    # plt.show()
+    fig_vel_all, ax_vel_all = plt.subplots(1, 1, figsize=figsize)
+    for err in gen_errors:
+        vd = err[5]
+        if (
+            "reconstruction_hip" in vd
+            and len(vd["reconstruction_hip"]["velocities"]) > 0
+        ):
+            ax_vel_all.plot(
+                vd["reconstruction_hip"]["timestamps"] / 1000.0,
+                vd["reconstruction_hip"]["velocities"],
+                alpha=0.3,
+                linewidth=0.6,
+            )
+    ax_vel_all.set_title("Velocidad de desplazamiento – Todas las capturas")
+    ax_vel_all.set_xlabel("Tiempo (s)")
+    ax_vel_all.set_ylabel("Velocidad (m/s)")
+    ax_vel_all.grid(True)
+    ax_vel_all.set_ylim(0, 3)
+    fig_vel_all.savefig("Results/velocity_all.png", dpi=300, bbox_inches="tight")
+    print("  ✓ Results/velocity_all.png")
 
-    print(f"Best file: {target_files[best_idx]} | idx: {best_idx}")
-    print(f"Worst file: {target_files[worst_idx]} | idx {worst_idx}")
-    print(f"Mean file: {target_files[mean_idx]} | idx {mean_idx}")
+    # Bland-Altman
+    fig_ba, axs_ba = plt.subplots(1, 3, figsize=(15, 5))
+    fig_ba.suptitle("Bland-Altman: Reconstrucción vs Ground Truth (captura promedio)")
+    for ax_i, ax_name in enumerate(axis_labels):
+        ba = ba_data[ax_name]
+        axs_ba[ax_i].scatter(ba["mean"], ba["diff"], alpha=0.15, s=3, color="steelblue")
+        axs_ba[ax_i].axhline(
+            ba["bias"],
+            color="red",
+            linestyle="-",
+            linewidth=1.5,
+            label=f"Sesgo: {ba['bias']:.4f} m",
+        )
+        axs_ba[ax_i].axhline(
+            ba["upper_loa"],
+            color="gray",
+            linestyle="--",
+            linewidth=1,
+            label=f"+1.96σ: {ba['upper_loa']:.4f} m",
+        )
+        axs_ba[ax_i].axhline(
+            ba["lower_loa"],
+            color="gray",
+            linestyle="--",
+            linewidth=1,
+            label=f"-1.96σ: {ba['lower_loa']:.4f} m",
+        )
+        axs_ba[ax_i].set_xlabel(f"Media {ax_name} (m)")
+        axs_ba[ax_i].set_ylabel(f"Diferencia {ax_name} (m)")
+        axs_ba[ax_i].set_title(f"Eje {ax_name}")
+        axs_ba[ax_i].legend(fontsize=7)
+        axs_ba[ax_i].grid(True, alpha=0.3)
+    fig_ba.tight_layout()
+    fig_ba.savefig("Results/bland_altman.png", dpi=300, bbox_inches="tight")
+    print("  ✓ Results/bland_altman.png")
+
+    # ROM de rodilla
+    kr_mean = gen_errors[mean_idx][6]["knee_rom"]
+    fig_rom, axs_rom = plt.subplots(1, 2, figsize=(12, 5))
+    fig_rom.suptitle("Ángulo de rodilla – Captura promedio")
+    for s_i, side in enumerate(["r", "l"]):
+        side_label = "Derecha" if side == "r" else "Izquierda"
+        rec_key = f"reconstruction_{side}"
+        aruco_key = f"aruco_{side}"
+        hom_key = f"homogeneous_mcd_{side}"
+        if hom_key in kr_mean and aruco_key in kr_mean:
+            axs_rom[s_i].plot(
+                kr_mean[hom_key]["angles"],
+                label="Reconstrucción",
+                color="blue",
+                alpha=0.8,
+            )
+            axs_rom[s_i].plot(
+                kr_mean[aruco_key]["angles"], label="ArUco (GT)", color="red", alpha=0.8
+            )
+        elif rec_key in kr_mean:
+            axs_rom[s_i].plot(
+                kr_mean[rec_key]["angles"],
+                label="Reconstrucción",
+                color="blue",
+                alpha=0.8,
+            )
+        axs_rom[s_i].set_title(f"Rodilla {side_label}")
+        axs_rom[s_i].set_xlabel("Muestra")
+        axs_rom[s_i].set_ylabel("Ángulo de flexión (°)")
+        axs_rom[s_i].legend()
+        axs_rom[s_i].grid(True, alpha=0.3)
+    fig_rom.tight_layout()
+    fig_rom.savefig("Results/knee_rom.png", dpi=300, bbox_inches="tight")
+    print("  ✓ Results/knee_rom.png")
+
+    print()
+    print("═" * W)
+    print("  ✅ Procesamiento completo.")
+    print("═" * W)
 
     process_files(target_files[best_idx], use_3d=True)
 
-    # animation(gen_errors[best_idx][2], gen_errors[best_idx][3], "best")
-    # animation(gen_errors[worst_idx][2], gen_errors[worst_idx][3], "worst")
-    # # [process_files(f) for f in files if f[0].split("/")[-2] != "19"]
-    # for i, g in enumerate(gen_errors):
-    #     s = files[i][0].split(split_char)[-2:]
-    #     animation(g[2], g[3], s)
-
     animation(gen_errors[mean_idx][2], gen_errors[mean_idx][3], "mean")
-
-    # print(f'Average: {np.mean(gen_errors)}')
-    # print(f'Variance: {np.var(gen_errors)}')
-    # print(f'Standard deviation: {np.std(gen_errors)}')
-    # print(f'Minimum: {np.min(gen_errors)}')
-    # print(f'Maximum: {np.max(gen_errors)}')
-    # for i, f in enumerate(files):
-    #     print(f'Processing file {i} | {f}')
-    # Best = (
-    #     "/media/moybadajoz/Nuevo vol/DataSet With Vid (copy)/1/mcd-0.csv",
-    #     "/media/moybadajoz/Nuevo vol/DataSet With Vid (copy)/1/arUcos-0.csv",
-    # )
-    # # Mean = ('/home/moybadajoz/Documents/NewDataset/29/mcd-3.csv',
-    # #         '/home/moybadajoz/Documents/NewDataset/29/arUcos-3.csv')
-    # worst = ('/home/moybadajoz/Documents/NewDataset/11/mcd-3.csv',
-    #          '/home/moybadajoz/Documents/NewDataset/11/arUcos-3.csv')
-    # title = 'worst'
-    # worst_mean, _, worst_reconstruction, worst_aruco = process_files(files[worst_idx])
-    # # title = 'mean'
-    # # # process_files(Mean)
-    # title = 'best'
-    # best_mean, _, best_reconstruction, best_aruco = process_files(Best)
-    # best_mean, _, best_reconstruction, best_aruco =process_files(Best)
-    # print(f'Best mean error: {np.mean(best_mean)}')
-    # # print(f'Best var error: {np.var(best_mean)}')
-    # # print(f'Worst mean error: {np.mean(worst_mean)}')
-    # # # print(f'Worst var error: {np.var(worst_mean)}')
-    # animation(best_reconstruction, best_aruco, "best")
-    # animation(worst_reconstruction, worst_aruco, "worst")
-
-    # process_files(Mean)
-    # plt.grid(1)
-    # plt.show()
