@@ -1,33 +1,24 @@
 """
-Red Neuronal: TTL Lite CV (TCN + Transformer Lite — Cross-Validation Robusto)
-=============================================================================
-Variante de nn_ttl_lite.py con protocolo de entrenamiento robusto para dataset
-pequeño (~30 sujetos). Implementa:
+Red Neuronal: TTL Lite (TCN + Transformer Lite)
+==============================================
+Arquitectura:
+  - Red Híbrida compuesta por:
+      1. Extractor local TCN (Convoluciones 1D causales dilatadas).
+      2. Capa BiLSTM recurrente para contexto bidireccional secuencial.
+      3. Transformer Encoder con Multi-Head Self-Attention para correlaciones de largo alcance.
+      4. Cabezal de regresión Multitarea (Pose 3D + Desplazamiento global).
+  - Función de pérdida profunda compuesta (deep_multitask_loss).
 
-  1. 5-Fold Grouped Cross-Validation (por sujeto):
-     - Cada fold deja ~6 sujetos fuera como test.
-     - Métricas finales = mean ± std de los 5 folds.
+Propósito:
+  - Capturar simultáneamente dinámicas de marcha a corto plazo (impactos/pivote vía TCN) y dependencias
+    periódicas globales (ciclos de zancada vía Transformer) con una carga computacional compacta.
 
-  2. Stochastic Weight Averaging (SWA):
-     - Promedia pesos del modelo durante las últimas épocas.
-     - Produce soluciones en mínimos más planos → mejor generalización.
-
-  3. Temporal Mixup:
-     - Interpolación convexa entre pares de ventanas de entrenamiento.
-     - Amplía artificialmente la diversidad inter-sujeto.
-
-Arquitectura (idéntica a TTL Lite):
-  - TCN (Conv1D dilatadas) + BiLSTM + Transformer Encoder + Cabezas Multitarea.
-
-Directorio de salida: nn-results/ttl_lite_cv/
-Checkpoints: nn-results/ttl_lite_cv/checkpoints/best_ttl_lite_foldN.pt
+Directorio de salida: nn-results/ttl_lite/
+Checkpoints: nn-results/ttl_lite/checkpoints/best_ttl_lite.pt
 
 Uso:
-    python nn_ttl_lite_cv.py                      # 5-Fold CV + evaluación
-    python nn_ttl_lite_cv.py --n-folds 3          # 3-Fold CV
-    python nn_ttl_lite_cv.py --single-split       # Single split (como original)
-    python nn_ttl_lite_cv.py --no-swa             # Desactivar SWA
-    python nn_ttl_lite_cv.py --no-mixup           # Desactivar Mixup
+    python -m models.nn_ttl_lite                         # Entrenamiento + evaluación
+    python -m models.nn_ttl_lite --eval-only             # Solo evaluación
 
 Autor: GaitTracking Project
 """
@@ -67,9 +58,9 @@ from process_all import (
 #  CONFIGURACIÓN
 # ═══════════════════════════════════════════════════════════════════════
 
-DATASET_PATH = Path("/home/moybadajoz/Documents/DataSet")
+DATASET_PATH = Path("/home/badajoz/Documents/DataSet")
 DATA_SPLIT_PATH = Path("data_split.json")
-RESULTS_DIR = Path("nn-results/ttl_lite_cv")
+RESULTS_DIR = Path("nn-results/ttl_lite")
 CHECKPOINT_DIR = RESULTS_DIR / "checkpoints"
 CHECKPOINT_NAME = "best_ttl_lite.pt"
 CHECKPOINT_PATH = CHECKPOINT_DIR / CHECKPOINT_NAME
@@ -87,30 +78,18 @@ TCN_KERNEL_SIZES = [7, 7, 5]  # tamaño de kernel por bloque
 TCN_DILATIONS = [1, 2, 4]  # dilatación por bloque
 LSTM_HIDDEN = 32  # neuronas ocultas del BiLSTM
 LSTM_LAYERS = 1  # capas del BiLSTM
-N_ATTENTION_HEADS = 1  # cabezas de atención (Transformer)
-N_ATTENTION_LAYERS = 1  # capas del Transformer
-HEAD_HIDDEN_DIM = 32  # neuronas en la capa oculta de las cabezas multitarea
+N_ATTENTION_HEADS = 2  # cabezas de atención (Transformer)
+N_ATTENTION_LAYERS = 2  # capas del Transformer
+HEAD_HIDDEN_DIM = 48  # neuronas en la capa oculta de las cabezas multitarea
 DROPOUT = 0.20  # mayor dropout para dataset pequeño
 
 # ── Entrenamiento ────────────────────────────────────────────────────
 BATCH_SIZE = 64
 LEARNING_RATE = 5e-4
-WEIGHT_DECAY = 1e-4
+WEIGHT_DECAY = 1e-5
 EPOCHS = 300
 PATIENCE = 60  # Early stopping
 GRAD_CLIP = 1.0
-
-# ── Cross-Validation ─────────────────────────────────────────────────
-N_FOLDS = 5  # Número de folds para Grouped K-Fold CV
-N_VAL_SUBJECTS_PER_FOLD = 3  # Sujetos para validación dentro de cada fold
-
-# ── Stochastic Weight Averaging (SWA) ────────────────────────────────
-SWA_START_FACTOR = 0.75  # Fracción de épocas tras la cual inicia SWA
-SWA_LR = 1e-5  # Learning rate constante durante la fase SWA
-
-# ── Temporal Mixup ───────────────────────────────────────────────────
-MIXUP_ALPHA = 0.2  # Parámetro α de la distribución Beta para Mixup
-MIXUP_PROB = 0.3  # Probabilidad de aplicar Mixup a cada muestra
 
 # ── Pesos de loss ────────────────────────────────────────────────────
 BONE_LOSS_WEIGHT = 0.1
@@ -434,13 +413,9 @@ class GaitDataset(Dataset):
         normalize: bool = True,
         stats: dict | None = None,
         augment: bool = False,
-        mixup_alpha: float = 0.0,
-        mixup_prob: float = 0.0,
     ):
         self.window_size = window_size
         self.augment = augment
-        self.mixup_alpha = mixup_alpha
-        self.mixup_prob = mixup_prob
         self.windows: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
 
         all_sensor_chunks: list[np.ndarray] = []
@@ -555,20 +530,6 @@ class GaitDataset(Dataset):
             if np.random.rand() < 0.05:
                 imu_idx = np.random.randint(0, len(IMU_NAMES))
                 sensor[:, imu_idx * 6 : (imu_idx + 1) * 6] = 0.0
-
-            # 6. Temporal Mixup: interpolación convexa con otra ventana aleatoria
-            if self.mixup_alpha > 0 and random.random() < self.mixup_prob:
-                j = random.randint(0, len(self.windows) - 1)
-                sensor_j, gt_pose_j, gt_disp_j, _ = self.windows[j]
-                sensor_j = sensor_j.copy()
-                gt_pose_j = gt_pose_j.copy()
-                gt_disp_j = gt_disp_j.copy()
-                if self.normalize:
-                    sensor_j = (sensor_j - self.mean) / self.std
-                lam = np.random.beta(self.mixup_alpha, self.mixup_alpha)
-                sensor = (lam * sensor + (1 - lam) * sensor_j).astype(np.float32)
-                gt_pose = (lam * gt_pose + (1 - lam) * gt_pose_j).astype(np.float32)
-                gt_disp = (lam * gt_disp + (1 - lam) * gt_disp_j).astype(np.float32)
 
         # Difundir medidas antropométricas a todos los timesteps
         anthro_broadcast = np.tile(anthropometric, (self.window_size, 1))
@@ -1151,9 +1112,6 @@ def train_multitask_model(
     lr: float = LEARNING_RATE,
     patience: int = PATIENCE,
     checkpoint_tag: str = "",
-    use_swa: bool = True,
-    swa_start_factor: float = SWA_START_FACTOR,
-    swa_lr: float = SWA_LR,
 ) -> dict:
     """
     Entrena la red multitarea con early stopping y gradientes combinados.
@@ -1166,14 +1124,6 @@ def train_multitask_model(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer, T_0=30, T_mult=2, eta_min=lr * 0.01
     )
-
-    # ── Stochastic Weight Averaging (SWA) ────────────────────────────
-    from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
-
-    swa_model = AveragedModel(model) if use_swa else None
-    swa_start_epoch = int(epochs * swa_start_factor)
-    swa_scheduler = SWALR(optimizer, swa_lr=swa_lr) if use_swa else None
-    swa_active = False
 
     history = {
         "train_loss": [],
@@ -1211,19 +1161,7 @@ def train_multitask_model(
             model, train_loader, optimizer, scaler, epoch=epoch, total_epochs=epochs
         )
         va = validate_multitask(model, val_loader)
-        if use_swa and epoch >= swa_start_epoch:
-            swa_scheduler.step()
-        else:
-            scheduler.step()  # CosineAnnealingWarmRestarts: step per epoch
-
-        # SWA: después de swa_start_epoch, acumular pesos promediados
-        if use_swa and epoch >= swa_start_epoch:
-            swa_model.update_parameters(model)
-            if not swa_active:
-                swa_active = True
-                print(
-                    f"\n  📊 SWA activado en época {epoch} (acumulando pesos promediados)"
-                )
+        scheduler.step()  # CosineAnnealingWarmRestarts: step per epoch
 
         history["train_loss"].append(tr["total"])
         history["val_loss"].append(va["total"])
@@ -1275,39 +1213,6 @@ def train_multitask_model(
 
     if best_state is not None:
         model.load_state_dict(best_state)
-
-    # ── Finalizar SWA: actualizar BatchNorm y usar modelo promediado ──
-    if use_swa and swa_active and swa_model is not None:
-        print("  📊 Actualizando BatchNorm del modelo SWA...")
-        try:
-            update_bn(train_loader, swa_model, device=DEVICE)
-            # Copiar pesos SWA al modelo principal
-            model.load_state_dict(
-                {
-                    k: v
-                    for k, v in zip(
-                        model.state_dict().keys(),
-                        swa_model.module.state_dict().values(),
-                    )
-                }
-            )
-            # Validar si SWA mejora sobre el best checkpoint
-            swa_val = validate_multitask(model, val_loader)
-            if swa_val["total"] < best_val_loss:
-                print(
-                    f"  ✅ SWA mejoró val loss: {best_val_loss:.6f} → {swa_val['total']:.6f}"
-                )
-                best_val_loss = swa_val["total"]
-            else:
-                print(
-                    f"  ℹ️  SWA no mejoró ({swa_val['total']:.6f} vs best {best_val_loss:.6f}), restaurando best checkpoint"
-                )
-                if best_state is not None:
-                    model.load_state_dict(best_state)
-        except Exception as e:
-            print(f"  [WARN] Error en SWA update_bn: {e}, usando best checkpoint")
-            if best_state is not None:
-                model.load_state_dict(best_state)
 
     total_time = time.time() - t_start
     print(f"\n  ✅ Entrenamiento multitarea completado en {total_time / 60:.1f} min")
@@ -2734,261 +2639,23 @@ def create_3d_animation(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  MODEL SOUP & ENSEMBLE DE PREDICCIÓN
-# ═══════════════════════════════════════════════════════════════════════
-
-
-def create_weight_soup(
-    checkpoint_dir: Path,
-    n_folds: int,
-    device: torch.device = DEVICE,
-) -> dict | None:
-    """
-    Crea un Model Soup promediando los state_dict de todos los folds.
-
-    Technique:
-      Wortsman et al. (2022) "Model soups: averaging weights of multiple
-      fine-tuned models improves accuracy without increasing inference time".
-
-    Returns:
-        state_dict promediado, o None si no se encontraron checkpoints.
-    """
-    avg_state = None
-    loaded = 0
-
-    for fold_idx in range(1, n_folds + 1):
-        ckpt_path = checkpoint_dir / f"best_ttl_lite_fold{fold_idx}.pt"
-        if not ckpt_path.exists():
-            print(f"  [WARN] Checkpoint no encontrado: {ckpt_path}")
-            continue
-
-        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-        state = ckpt["model_state_dict"]
-
-        if avg_state is None:
-            avg_state = {k: v.float().clone() for k, v in state.items()}
-        else:
-            for k in avg_state:
-                avg_state[k] += state[k].float()
-        loaded += 1
-
-    if loaded == 0 or avg_state is None:
-        return None
-
-    for k in avg_state:
-        avg_state[k] /= loaded
-
-    print(f"  🍲 Weight Soup: promediados {loaded} modelos de fold")
-    return avg_state
-
-
-def load_fold_models(
-    checkpoint_dir: Path,
-    n_folds: int,
-    model_factory,
-    device: torch.device = DEVICE,
-) -> list[tuple[nn.Module, dict]]:
-    """
-    Carga todos los modelos de fold con sus norm_stats individuales.
-
-    Args:
-        model_factory: callable que retorna un modelo fresco (sin pesos).
-
-    Returns:
-        Lista de (modelo, norm_stats) por fold.
-    """
-    models_and_stats = []
-
-    for fold_idx in range(1, n_folds + 1):
-        ckpt_path = checkpoint_dir / f"best_ttl_lite_fold{fold_idx}.pt"
-        if not ckpt_path.exists():
-            continue
-
-        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-        model = model_factory().to(device)
-        model.load_state_dict(ckpt["model_state_dict"])
-        model.eval()
-
-        norm_stats = ckpt.get("norm_stats", None)
-        if norm_stats is not None:
-            # Asegurar que son arrays numpy float32
-            for k in norm_stats:
-                if isinstance(norm_stats[k], torch.Tensor):
-                    norm_stats[k] = norm_stats[k].cpu().numpy().astype(np.float32)
-                elif isinstance(norm_stats[k], list):
-                    norm_stats[k] = np.array(norm_stats[k], dtype=np.float32)
-                elif isinstance(norm_stats[k], np.ndarray):
-                    norm_stats[k] = norm_stats[k].astype(np.float32)
-
-        models_and_stats.append((model, norm_stats))
-
-    print(f"  📦 Cargados {len(models_and_stats)} modelos de fold para ensemble")
-    return models_and_stats
-
-
-def evaluate_ensemble_on_captures(
-    models_and_stats: list[tuple[nn.Module, dict]],
-    captures: list[dict],
-    label: str = "Prediction Ensemble",
-    window_size: int = WINDOW_SIZE,
-) -> dict:
-    """
-    Evalúa un ensemble de predicciones: cada modelo predice independientemente
-    (con sus propios norm_stats) y se promedian las salidas.
-
-    Returns:
-        dict con métricas (mpjpe, mae, rmse, displacement).
-    """
-    all_predictions = []
-    all_targets = []
-    all_hip_preds = []
-    all_hip_gts = []
-    all_disp_preds = []
-    all_disp_gts = []
-    epe_list = []
-
-    for cap in captures:
-        anthropometric = np.array(
-            [
-                cap["femur_length"] / GaitDataset.BONE_NORM,
-                cap["tibia_length"] / GaitDataset.BONE_NORM,
-                cap["hip_width"] / GaitDataset.BONE_NORM,
-                1.0 if cap["direction"] == "R" else 0.0,
-            ],
-            dtype=np.float32,
-        )
-
-        # Predecir con cada modelo y promediar
-        fold_poses = []
-        fold_disps = []
-        valid_any = None
-
-        for model, norm_stats in models_and_stats:
-            if norm_stats is None:
-                continue
-            pred_pose, pred_disp, _, valid = predict_full_sequence_multitask(
-                model,
-                cap["sensor_data"],
-                anthropometric,
-                norm_stats,
-                window_size=window_size,
-                initial_hip=cap["gt_hip"],
-            )
-            fold_poses.append(pred_pose)
-            fold_disps.append(pred_disp)
-            if valid_any is None:
-                valid_any = valid.copy()
-            else:
-                valid_any &= valid
-
-        if len(fold_poses) == 0 or valid_any is None:
-            continue
-
-        # Promediar predicciones de todos los modelos
-        avg_pose = np.mean(fold_poses, axis=0)
-        avg_disp = np.mean(fold_disps, axis=0)
-
-        # Reconstruir trayectoria global con desplazamiento promediado
-        if cap.get("gt_hip") is not None and len(cap["gt_hip"]) > 0:
-            base_hip = cap["gt_hip"][0].copy()
-        else:
-            base_hip = np.zeros(3)
-
-        pred_j_all = avg_pose.reshape(-1, N_JOINTS, N_COORDS)
-        ankles_z = np.minimum(pred_j_all[:, 4, 2], pred_j_all[:, 5, 2])
-        kinematic_h_z = -ankles_z
-
-        pred_hip_cumsum = np.cumsum(avg_disp, axis=0) + base_hip
-        pred_hip_global = pred_hip_cumsum.copy()
-        pred_hip_global[:, 2] = base_hip[2] + (kinematic_h_z - kinematic_h_z[0])
-
-        # Evaluar solo donde GT y predicción son válidos
-        mask = cap["gt_mask"] & valid_any
-        if np.sum(mask) < 10:
-            continue
-
-        all_predictions.append(avg_pose[mask])
-        all_targets.append(cap["gt_relative"][mask])
-        all_hip_preds.append(pred_hip_global[mask])
-        all_hip_gts.append(cap["gt_hip"][mask])
-        all_disp_preds.append(avg_disp[mask])
-        gt_disp = cap.get("gt_hip_disp", np.zeros((len(cap["sensor_data"]), 3)))
-        all_disp_gts.append(gt_disp[mask])
-
-        final_diff = float(
-            np.linalg.norm(pred_hip_global[mask][-1] - cap["gt_hip"][mask][-1])
-        )
-        epe_list.append(final_diff)
-
-    if len(all_predictions) == 0:
-        return {}
-
-    all_pred = np.concatenate(all_predictions, axis=0)
-    all_tgt = np.concatenate(all_targets, axis=0)
-    all_hp = np.concatenate(all_hip_preds, axis=0)
-    all_hg = np.concatenate(all_hip_gts, axis=0)
-    all_dp = np.concatenate(all_disp_preds, axis=0)
-    all_dg = np.concatenate(all_disp_gts, axis=0)
-
-    # Reconstrucción Global 3D
-    all_pred_global = np.zeros_like(all_pred)
-    all_tgt_global = np.zeros_like(all_tgt)
-    for j in range(N_JOINTS):
-        all_pred_global[:, j * 3 : (j + 1) * 3] = (
-            all_pred[:, j * 3 : (j + 1) * 3] + all_hp
-        )
-        all_tgt_global[:, j * 3 : (j + 1) * 3] = (
-            all_tgt[:, j * 3 : (j + 1) * 3] + all_hg
-        )
-
-    mpjpe = compute_mpjpe(all_pred, all_tgt, percentile=100.0)
-    mpjpe_p95 = compute_mpjpe(all_pred, all_tgt, percentile=95.0)
-    global_mpjpe_100 = compute_mpjpe(all_pred_global, all_tgt_global, percentile=100.0)
-    global_mpjpe_p95 = compute_mpjpe(all_pred_global, all_tgt_global, percentile=95.0)
-    mae = compute_mae_per_joint(all_pred, all_tgt, percentile=100.0)
-    rmse = compute_rmse_per_joint(all_pred, all_tgt, percentile=100.0)
-    displacement = compute_displacement_metrics(
-        all_hp, all_hg, all_dp, all_dg, epe_list
-    )
-
-    # Imprimir resultados
-    print(f"\n  📊 Evaluación {label} ({len(models_and_stats)} modelos)")
-    print(f"  {'─' * 65}")
-    print(
-        f"    MPJPE Relativo:        {mpjpe['mean']:.4f} m  (Percentil 95%: {mpjpe_p95['mean']:.4f} m)"
-    )
-    for name in JOINT_NAMES:
-        print(
-            f"      {name:<14}       {mpjpe[name]:.4f} m  (P95: {mpjpe_p95[name]:.4f} m)"
-        )
-    print(
-        f"    MPJPE Global 3D:       {global_mpjpe_100['mean']:.4f} m  (Percentil 95%: {global_mpjpe_p95['mean']:.4f} m)"
-    )
-    print(f"    MAE Relativo:          {mae['mean']:.4f} m")
-    print(f"    RMSE Relativo:         {rmse['mean']:.4f} m")
-    if displacement:
-        print(f"    ATE (Trayectoria):     {displacement['ate_mean']*100:.2f} cm")
-        print(f"    EPE (Deriva final):    {displacement['epe_mean']*100:.2f} cm")
-
-    return {
-        "mpjpe": mpjpe,
-        "mpjpe_p95": mpjpe_p95,
-        "global_mpjpe": global_mpjpe_100,
-        "global_mpjpe_p95": global_mpjpe_p95,
-        "mae": mae,
-        "rmse": rmse,
-        "displacement": displacement,
-    }
-
-
-# ═══════════════════════════════════════════════════════════════════════
 #  PIPELINE PRINCIPAL
 # ═══════════════════════════════════════════════════════════════════════
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="TTL Lite CV — Cross-Validation Robusto para Reconstrucción de Marcha"
+        description="Reconstrucción de marcha con redes neuronales"
+    )
+    parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help="Solo evaluación con modelo guardado",
+    )
+    parser.add_argument(
+        "--animate",
+        action="store_true",
+        help="Generar animación 3D comparativa (NN vs ArUco)",
     )
     parser.add_argument("--epochs", type=int, default=EPOCHS)
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
@@ -2996,51 +2663,72 @@ def main():
     parser.add_argument("--window-size", type=int, default=WINDOW_SIZE)
     parser.add_argument("--window-stride", type=int, default=WINDOW_STRIDE)
     parser.add_argument(
-        "--dataset", type=str, default=str(DATASET_PATH), help="Ruta al dataset"
-    )
-    parser.add_argument(
-        "--patience", type=int, default=PATIENCE, help="Paciencia del early stopping"
-    )
-    parser.add_argument(
-        "--seed", type=int, default=42, help="Semilla aleatoria para reproducibilidad"
-    )
-    parser.add_argument(
-        "--n-folds",
-        type=int,
-        default=N_FOLDS,
-        help=f"Número de folds para Cross-Validation (default: {N_FOLDS})",
-    )
-    parser.add_argument(
-        "--single-split",
-        action="store_true",
-        help="Usar single split en vez de K-Fold CV (comportamiento original)",
-    )
-    parser.add_argument(
-        "--no-swa",
-        action="store_true",
-        help="Desactivar Stochastic Weight Averaging",
-    )
-    parser.add_argument(
-        "--no-mixup",
-        action="store_true",
-        help="Desactivar Temporal Mixup",
+        "--dataset",
+        type=str,
+        default=str(DATASET_PATH),
+        help="Ruta al dataset",
     )
     parser.add_argument(
         "--n-val-subjects",
         type=int,
-        default=N_VAL_SUBJECTS_PER_FOLD,
-        help="Número de sujetos para validación por fold",
+        default=3,
+        help="Número de sujetos para el conjunto de validación (default: 3)",
     )
     parser.add_argument(
         "--n-test-subjects",
         type=int,
-        default=3,
-        help="Número de sujetos para test (solo en modo --single-split)",
+        default=5,
+        help="Número de sujetos para el conjunto de test (default: 5)",
     )
     parser.add_argument(
-        "--eval-only",
+        "--val-subjects",
+        nargs="+",
+        type=str,
+        default=None,
+        help="Lista de IDs de sujetos específicos para validación (ej: 25 26 27)",
+    )
+    parser.add_argument(
+        "--test-subjects",
+        nargs="+",
+        type=str,
+        default=None,
+        help="Lista de IDs de sujetos específicos para test (ej: 28 29 30)",
+    )
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=PATIENCE,
+        help="Paciencia del entrenamiento (default: 10)",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Ruta al checkpoint del modelo",
+    )
+    parser.add_argument(
+        "--shuffle-subjects",
         action="store_true",
-        help="Solo evaluación con modelos guardados (no entrena, evalúa CV + Weight Soup + Ensemble)",
+        default=True,
+        help="Mezclar aleatoriamente los sujetos antes de dividir en train/val/test (default: True)",
+    )
+    parser.add_argument(
+        "--no-shuffle-subjects",
+        dest="shuffle_subjects",
+        action="store_false",
+        help="Desactivar la mezcla aleatoria de sujetos (usar orden numérico por ID)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Semilla aleatoria para la mezcla de sujetos y reproducibilidad (default: 42)",
+    )
+    parser.add_argument(
+        "--checkpoint-tag",
+        type=str,
+        default="",
+        help="Tag para identificar el checkpoint (default: '')",
     )
     parser.add_argument(
         "--data-split",
@@ -3048,39 +2736,24 @@ def main():
         default=str(DATA_SPLIT_PATH),
         help="Ruta al archivo JSON con la división de sujetos (default: data_split.json)",
     )
-    parser.add_argument(
-        "--animate",
-        action="store_true",
-        help="Generar animación 3D comparativa",
-    )
     args = parser.parse_args()
 
-    use_swa = not args.no_swa
-    use_mixup = not args.no_mixup
-    mixup_alpha = MIXUP_ALPHA if use_mixup else 0.0
-    mixup_prob = MIXUP_PROB if use_mixup else 0.0
-
     # Fijar semillas para reproducibilidad
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
 
     dataset_path = Path(args.dataset)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
-    mode_str = "Single Split" if args.single_split else f"{args.n_folds}-Fold CV"
     print()
     print("═" * W)
-    print("  🦿 TTL LITE CV — RECONSTRUCCIÓN DE MARCHA CON VALIDACIÓN CRUZADA")
+    print("  🦿 RECONSTRUCCIÓN DE MARCHA CON REDES NEURONALES")
     print("═" * W)
-    print(f"  Modo:             {mode_str}")
-    print(f"  SWA:              {'✅ Activado' if use_swa else '❌ Desactivado'}")
-    print(
-        f"  Mixup:            {'✅ α=' + str(mixup_alpha) if use_mixup else '❌ Desactivado'}"
-    )
     print(f"  Dataset:          {dataset_path}")
     print(f"  Device:           {DEVICE}")
     if DEVICE.type == "cuda":
@@ -3098,7 +2771,7 @@ def main():
         print("  [ERROR] No se encontraron archivos en el dataset")
         sys.exit(1)
 
-    # ── 2. Preparar datos ────────────────────────────────────
+    # ── 2. Preparar datos ────────────────────────────────────────────
     print("\n  ⚙️  Cargando y preparando capturas...")
     subjects_data: dict[str, list[dict]] = {}
     file_paths_by_subject: dict[str, list[tuple[str, str]]] = {}
@@ -3129,564 +2802,365 @@ def main():
             flush=True,
         )
 
-    print()
+    print()  # Nueva línea al terminar la barra de progreso
     print(f"\n  ✓ Capturas cargadas correctamente: {success_count}/{total_captures}")
     print(f"  ✗ Capturas fallidas/omitidas:     {failed_count}/{total_captures}")
 
     all_subjects = sorted(subjects_data.keys(), key=lambda x: int(x))
 
     if len(all_subjects) < 3:
-        print("  [ERROR] Se necesitan al menos 3 sujetos")
+        print("  [ERROR] Se necesitan al menos 3 sujetos para train/val/test")
         sys.exit(1)
 
-    # ── 3. Construir folds ───────────────────────────────────────────
-    subjects_pool = list(all_subjects)
-    rng = random.Random(args.seed)
-    rng.shuffle(subjects_pool)
-
+    # ── 3. Dividir por sujeto (Configurable + data_split.json + Shuffle) ─
     split_path = Path(args.data_split) if args.data_split else None
-    if args.single_split:
-        if (
-            split_path
-            and split_path.exists()
-            and args.n_val_subjects == N_VAL_SUBJECTS_PER_FOLD
-        ):
-            with open(split_path, "r") as f:
-                split_info = json.load(f)
-            train_subjects = [
-                str(s)
-                for s in split_info.get("train_subjects", [])
-                if str(s) in subjects_data
-            ]
-            val_subjects = [
-                str(s)
-                for s in split_info.get("val_subjects", [])
-                if str(s) in subjects_data
-            ]
-            test_subjects = [
-                str(s)
-                for s in split_info.get("test_subjects", [])
-                if str(s) in subjects_data
-            ]
-            folds = [(train_subjects, val_subjects, test_subjects)]
-            print(f"\n  📊 Modo Single Split (desde {split_path}):")
-            print(f"    Train ({len(train_subjects)} sujetos): {train_subjects}")
-            print(f"    Val   ({len(val_subjects)} sujetos):   {val_subjects}")
-            print(f"    Test  ({len(test_subjects)} sujetos):  {test_subjects}")
+    if (
+        split_path
+        and split_path.exists()
+        and args.test_subjects is None
+        and args.val_subjects is None
+    ):
+        with open(split_path, "r") as f:
+            split_info = json.load(f)
+        train_subjects = [
+            str(s)
+            for s in split_info.get("train_subjects", [])
+            if str(s) in subjects_data
+        ]
+        val_subjects = [
+            str(s)
+            for s in split_info.get("val_subjects", [])
+            if str(s) in subjects_data
+        ]
+        test_subjects = [
+            str(s)
+            for s in split_info.get("test_subjects", [])
+            if str(s) in subjects_data
+        ]
+        print(f"\n  📊 División de datos cargada desde {split_path}:")
+        print(f"    Train ({len(train_subjects)} sujetos):      {train_subjects}")
+        print(f"    Validación ({len(val_subjects)} sujetos): {val_subjects}")
+        print(f"    Test ({len(test_subjects)} sujetos):       {test_subjects}")
+    else:
+        subjects_pool = list(all_subjects)
+        if args.shuffle_subjects:
+            rng = random.Random(args.seed)
+            rng.shuffle(subjects_pool)
+
+        if args.test_subjects is not None:
+            test_subjects = [s for s in args.test_subjects if s in subjects_data]
         else:
             n_test = min(args.n_test_subjects, max(1, len(subjects_pool) - 2))
             test_subjects = subjects_pool[-n_test:]
-            remaining = [s for s in subjects_pool if s not in test_subjects]
-            n_val = min(args.n_val_subjects, max(1, len(remaining) - 1))
-            val_subjects = remaining[-n_val:]
-            train_subjects = remaining[:-n_val]
-            folds = [(train_subjects, val_subjects, test_subjects)]
-            print(f"\n  📊 Modo Single Split (Seed={args.seed}):")
-            print(f"    Train: {train_subjects}")
-            print(f"    Val:   {val_subjects}")
-            print(f"    Test:  {test_subjects}")
-    else:
-        n_folds = args.n_folds
-        fold_size = len(subjects_pool) // n_folds
-        folds = []
-        for fold_idx in range(n_folds):
-            test_start = fold_idx * fold_size
-            test_end = (
-                test_start + fold_size if fold_idx < n_folds - 1 else len(subjects_pool)
-            )
-            test_subj = subjects_pool[test_start:test_end]
-            remaining = [s for s in subjects_pool if s not in test_subj]
-            n_val = min(args.n_val_subjects, max(1, len(remaining) - 1))
-            val_subj = remaining[-n_val:]
-            train_subj = remaining[:-n_val]
-            folds.append((train_subj, val_subj, test_subj))
 
-        print(f"\n  📊 {n_folds}-Fold Grouped CV (Seed={args.seed}):")
-        for i, (tr, va, te) in enumerate(folds):
-            print(
-                f"    Fold {i+1}: Train={len(tr)} sujetos, Val={len(va)}, Test={len(te)} → Test: {te}"
-            )
+        remaining_subjects = [s for s in subjects_pool if s not in test_subjects]
 
-    # ── 4. Iterar sobre folds ────────────────────────────────────────
-    all_fold_metrics = []
-
-    for fold_idx, (train_subj, val_subj, test_subj) in enumerate(folds):
-        fold_label = f"Fold {fold_idx + 1}/{len(folds)}"
-        print(f"\n{'═' * W}")
-        print(f"  🔄 {fold_label}")
-        print(f"  Train ({len(train_subj)}): {train_subj}")
-        print(f"  Val   ({len(val_subj)}):   {val_subj}")
-        print(f"  Test  ({len(test_subj)}):  {test_subj}")
-        print(f"{'═' * W}")
-
-        train_captures = []
-        for s in train_subj:
-            train_captures.extend(subjects_data[s])
-        val_captures = []
-        for s in val_subj:
-            val_captures.extend(subjects_data[s])
-        test_captures = []
-        test_file_paths = []
-        for s in test_subj:
-            test_captures.extend(subjects_data[s])
-            test_file_paths.extend(file_paths_by_subject[s])
-
-        # Crear datasets
-        train_dataset = GaitDataset(
-            train_captures,
-            window_size=args.window_size,
-            stride=args.window_stride,
-            augment=True,
-            mixup_alpha=mixup_alpha,
-            mixup_prob=mixup_prob,
-        )
-        norm_stats = train_dataset.get_stats()
-
-        val_dataset = GaitDataset(
-            val_captures,
-            window_size=args.window_size,
-            stride=args.window_size,
-            stats=norm_stats,
-        )
-
-        print(f"    Train ventanas: {len(train_dataset)}")
-        print(f"    Val ventanas:   {len(val_dataset)}")
-
-        if len(train_dataset) == 0:
-            print(
-                f"  [WARN] Fold {fold_idx + 1}: sin ventanas de entrenamiento, saltando"
-            )
-            continue
-
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=4,
-            pin_memory=True,
-            drop_last=True,
-        )
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=4,
-            pin_memory=True,
-        )
-
-        # Crear modelo
-        model = GaitMultiTaskNetTTLLite(
-            input_dim=INPUT_DIM,
-            output_dim=OUTPUT_DIM,
-        ).to(DEVICE)
-
-        if fold_idx == 0:
-            print_model_summary(model)
-
-        fold_tag = f"fold{fold_idx + 1}"
-        ckpt_path = CHECKPOINT_DIR / f"best_ttl_lite_{fold_tag}.pt"
-
-        if args.eval_only:
-            if not ckpt_path.exists():
-                print(
-                    f"  [WARN] Checkpoint no encontrado: {ckpt_path}, saltando {fold_label}"
-                )
-                continue
-            print(f"\n  📥 Cargando modelo para {fold_label} desde {ckpt_path}...")
-            ckpt = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
-            model.load_state_dict(ckpt["model_state_dict"])
-            if "norm_stats" in ckpt and ckpt["norm_stats"] is not None:
-                ns = ckpt["norm_stats"]
-                for k in ns:
-                    if isinstance(ns[k], torch.Tensor):
-                        norm_stats[k] = ns[k].cpu().numpy().astype(np.float32)
-                    elif isinstance(ns[k], list):
-                        norm_stats[k] = np.array(ns[k], dtype=np.float32)
-                    elif isinstance(ns[k], np.ndarray):
-                        norm_stats[k] = ns[k].astype(np.float32)
+        if args.val_subjects is not None:
+            val_subjects = [s for s in args.val_subjects if s in remaining_subjects]
         else:
-            # Entrenar
-            history = train_multitask_model(
-                model,
-                train_loader,
-                val_loader,
-                epochs=args.epochs,
-                lr=args.lr,
-                patience=args.patience,
-                checkpoint_tag=fold_tag,
-                use_swa=use_swa,
-            )
+            n_val = min(args.n_val_subjects, max(1, len(remaining_subjects) - 1))
+            val_subjects = remaining_subjects[-n_val:]
 
-            # Guardar norm_stats en el checkpoint
-            if ckpt_path.exists():
-                ckpt = torch.load(ckpt_path, weights_only=False)
-                ckpt["norm_stats"] = {
-                    "mean": norm_stats["mean"],
-                    "std": norm_stats["std"],
-                }
-                torch.save(ckpt, ckpt_path)
+        train_subjects = [s for s in remaining_subjects if s not in val_subjects]
 
-            # Guardar historial por fold
-            history_to_save = {
-                k: [float(v) for v in vals] for k, vals in history.items()
-            }
-            with open(RESULTS_DIR / f"training_history_{fold_tag}.json", "w") as f:
-                json.dump(history_to_save, f, indent=2)
+        print(
+            f"\n  📊 División de datos (Shuffle={args.shuffle_subjects}, Seed={args.seed}):"
+        )
+        print(f"    Train ({len(train_subjects)} sujetos):      {train_subjects}")
+        print(f"    Validación ({len(val_subjects)} sujetos): {val_subjects}")
+        print(f"    Test ({len(test_subjects)} sujetos):       {test_subjects}")
 
-        # Evaluar en test set del fold
-        print(f"\n  📊 Evaluando {fold_label} en test set...")
-        eval_metrics = evaluate_on_captures(
+    train_captures = []
+    for s in train_subjects:
+        train_captures.extend(subjects_data[s])
+
+    val_captures = []
+    for s in val_subjects:
+        val_captures.extend(subjects_data[s])
+
+    test_captures = []
+    test_file_paths = []
+    for s in test_subjects:
+        test_captures.extend(subjects_data[s])
+        test_file_paths.extend(file_paths_by_subject[s])
+
+    print(f"    Train capturas:  {len(train_captures)}")
+    print(f"    Val capturas:    {len(val_captures)}")
+    print(f"    Test capturas:   {len(test_captures)}")
+
+    # ── 4. Crear Datasets ────────────────────────────────────────────
+    print("\n  📦 Creando datasets con ventanas deslizantes...")
+
+    train_dataset = GaitDataset(
+        train_captures,
+        window_size=args.window_size,
+        stride=args.window_stride,
+        augment=True,  # Data augmentation: jitter + channel dropout
+    )
+    norm_stats = train_dataset.get_stats()
+
+    val_dataset = GaitDataset(
+        val_captures,
+        window_size=args.window_size,
+        stride=args.window_size,  # Sin solapamiento para validación
+        stats=norm_stats,
+    )
+
+    print(f"    Train ventanas:  {len(train_dataset)}")
+    print(f"    Val ventanas:    {len(val_dataset)}")
+
+    if len(train_dataset) == 0:
+        print("  [ERROR] No se generaron ventanas de entrenamiento")
+        sys.exit(1)
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        drop_last=True,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+    )
+
+    # ── 5. Crear modelo multitarea unificado ─────────────────────────
+    model = GaitMultiTaskNetTTLLite(
+        input_dim=INPUT_DIM,
+        output_dim=OUTPUT_DIM,
+    ).to(DEVICE)
+
+    print_model_summary(model)
+
+    # ── 6. Entrenar o cargar checkpoint ──────────────────────────────
+    checkpoint_path = (
+        Path(args.checkpoint)
+        if args.checkpoint
+        else (
+            CHECKPOINT_DIR / f"best_ttl_lite_{args.checkpoint_tag}.pt"
+            if args.checkpoint_tag
+            else CHECKPOINT_PATH
+        )
+    )
+
+    if args.eval_only:
+        if not checkpoint_path.exists():
+            print(f"  [ERROR] No se encontró checkpoint en {checkpoint_path}")
+            sys.exit(1)
+        print(
+            f"\n  📥 Cargando GaitMultiTaskNetTTLLite (TTL Lite) desde {checkpoint_path}"
+        )
+        checkpoint = torch.load(
+            checkpoint_path, map_location=DEVICE, weights_only=False
+        )
+        model.load_state_dict(checkpoint["model_state_dict"])
+    else:
+        history = train_multitask_model(
             model,
-            test_captures,
-            norm_stats,
-            label=f"Test Set ({fold_label})",
-            file_paths=test_file_paths,
-            window_size=args.window_size,
+            train_loader,
+            val_loader,
+            epochs=args.epochs,
+            lr=args.lr,
+            patience=args.patience,
+            checkpoint_tag=args.checkpoint_tag,
         )
 
-        if eval_metrics:
-            eval_metrics["fold"] = fold_idx + 1
-            eval_metrics["test_subjects"] = test_subj
-            all_fold_metrics.append(eval_metrics)
+        stats_to_save = {
+            "mean": norm_stats["mean"].tolist(),
+            "std": norm_stats["std"].tolist(),
+        }
+        with open(CHECKPOINT_DIR / "norm_stats.json", "w") as f:
+            json.dump(stats_to_save, f)
 
-    # ── 5. Resultados Agregados ──────────────────────────────────────
-    if len(all_fold_metrics) > 1:
-        print(f"\n{'═' * W}")
-        print(
-            f"  📊 RESULTADOS AGREGADOS — {len(all_fold_metrics)}-FOLD CROSS-VALIDATION"
+        # Guardar norm_stats también dentro del checkpoint .pt (evita bugs de float64)
+        ckpt_path = (
+            CHECKPOINT_DIR / f"best_ttl_lite_{args.checkpoint_tag}.pt"
+            if args.checkpoint_tag
+            else CHECKPOINT_PATH
         )
-        print(f"{'═' * W}")
+        if ckpt_path.exists():
+            ckpt = torch.load(ckpt_path, weights_only=False)
+            ckpt["norm_stats"] = {"mean": norm_stats["mean"], "std": norm_stats["std"]}
+            torch.save(ckpt, ckpt_path)
 
-        mpjpe_per_fold = [m["mpjpe"]["mean"] for m in all_fold_metrics]
-        mpjpe_p95_per_fold = [
-            m.get("mpjpe_p95", m["mpjpe"])["mean"] for m in all_fold_metrics
-        ]
-        global_mpjpe_per_fold = [
-            m["global_mpjpe"]["mean"] for m in all_fold_metrics if "global_mpjpe" in m
-        ]
-        global_mpjpe_p95_per_fold = [
-            m["global_mpjpe_p95"]["mean"]
-            for m in all_fold_metrics
-            if "global_mpjpe_p95" in m
-        ]
+        # Guardar historial
+        history_to_save = {k: [float(v) for v in vals] for k, vals in history.items()}
+        with open(RESULTS_DIR / "training_history.json", "w") as f:
+            json.dump(history_to_save, f, indent=2)
 
-        print(f"\n  MPJPE Pose Relativa (mean ± std):")
-        print(
-            f"    General (100%): {np.mean(mpjpe_per_fold):.4f} ± {np.std(mpjpe_per_fold):.4f} m"
-        )
-        print(
-            f"    General (P95%): {np.mean(mpjpe_p95_per_fold):.4f} ± {np.std(mpjpe_p95_per_fold):.4f} m"
-        )
-        for j_name in JOINT_NAMES:
-            vals = [m["mpjpe"][j_name] for m in all_fold_metrics]
-            vals_p95 = [
-                m.get("mpjpe_p95", m["mpjpe"])[j_name] for m in all_fold_metrics
-            ]
-            print(
-                f"    {j_name:<14}  {np.mean(vals):.4f} ± {np.std(vals):.4f} m  (P95: {np.mean(vals_p95):.4f} m)"
-            )
+    # ── 7. Evaluación en test set ────────────────────────────────────
+    print("\n  📊 Evaluando en test set...")
+    eval_metrics = evaluate_on_captures(
+        model,
+        test_captures,
+        norm_stats,
+        label="Test Set",
+        file_paths=test_file_paths,
+        window_size=args.window_size,
+    )
 
-        if global_mpjpe_per_fold:
-            print(f"\n  MPJPE Global 3D con Odometría Acumulada (mean ± std):")
-            print(
-                f"    General (100%): {np.mean(global_mpjpe_per_fold):.4f} ± {np.std(global_mpjpe_per_fold):.4f} m"
-            )
-            print(
-                f"    General (P95%): {np.mean(global_mpjpe_p95_per_fold):.4f} ± {np.std(global_mpjpe_p95_per_fold):.4f} m"
-            )
-            for j_name in JOINT_NAMES:
-                vals_g = [m["global_mpjpe"][j_name] for m in all_fold_metrics]
-                vals_gp95 = [m["global_mpjpe_p95"][j_name] for m in all_fold_metrics]
-                print(
-                    f"    {j_name:<14}  {np.mean(vals_g):.4f} ± {np.std(vals_g):.4f} m  (P95: {np.mean(vals_gp95):.4f} m)"
-                )
+    # ── 8. Comparación con pipeline analítico ────────────────────────
+    print("\n  🔀 Comparando con pipeline analítico...")
+    comparison = compare_with_analytical(
+        model,
+        test_captures,
+        test_file_paths,
+        norm_stats,
+        window_size=args.window_size,
+    )
 
-        if all("mae" in m for m in all_fold_metrics):
-            mae_per_fold = [m["mae"]["mean"] for m in all_fold_metrics]
-            print(f"\n  MAE Relativo (mean ± std):")
-            print(
-                f"    General:        {np.mean(mae_per_fold):.4f} ± {np.std(mae_per_fold):.4f} m"
-            )
 
-        if all("rmse" in m for m in all_fold_metrics):
-            rmse_per_fold = [m["rmse"]["mean"] for m in all_fold_metrics]
-            print(f"\n  RMSE Relativo (mean ± std):")
-            print(
-                f"    General:        {np.mean(rmse_per_fold):.4f} ± {np.std(rmse_per_fold):.4f} m"
-            )
+def plot_displacement_analysis(eval_metrics: dict, save_dir: Path):
+    """Grafica el análisis de error del desplazamiento pélvico autónomo."""
+    if "displacement" not in eval_metrics or len(eval_metrics["all_hip_preds"]) == 0:
+        return
 
-        if all("displacement" in m for m in all_fold_metrics):
-            ate_per_fold = [m["displacement"]["ate_mean"] for m in all_fold_metrics]
-            epe_per_fold = [m["displacement"]["epe_mean"] for m in all_fold_metrics]
-            print(f"\n  Desplazamiento Pélvico:")
-            print(
-                f"    ATE:            {np.mean(ate_per_fold)*100:.2f} ± {np.std(ate_per_fold)*100:.2f} cm"
-            )
-            print(
-                f"    EPE:            {np.mean(epe_per_fold)*100:.2f} ± {np.std(epe_per_fold)*100:.2f} cm"
-            )
+    disp = eval_metrics["displacement"]
+    all_hip_p = eval_metrics["all_hip_preds"]
+    all_hip_g = eval_metrics["all_hip_gts"]
 
-        print(f"\n  Detalle por fold:")
-        for m in all_fold_metrics:
-            fold_n = m["fold"]
-            subjs = m["test_subjects"]
-            mpjpe_val = m["mpjpe"]["mean"]
-            g_p95_str = (
-                f" │ Global 3D P95={m['global_mpjpe_p95']['mean']:.4f} m"
-                if "global_mpjpe_p95" in m
-                else ""
-            )
-            print(
-                f"    Fold {fold_n}: MPJPE Rel={mpjpe_val:.4f} m{g_p95_str} │ Test: {subjs}"
-            )
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-        print(f"{'═' * W}")
+    # Ejemplo: Primera captura del conjunto de test
+    hip_p_cap = all_hip_p[0]
+    hip_g_cap = all_hip_g[0]
+    time_axis = np.arange(len(hip_p_cap)) * 0.01  # 100 Hz
 
-        aggregate = {
-            "n_folds": len(all_fold_metrics),
-            "swa": use_swa,
-            "mixup": use_mixup,
-            "mpjpe_mean": float(np.mean(mpjpe_per_fold)),
-            "mpjpe_std": float(np.std(mpjpe_per_fold)),
-            "mpjpe_p95_mean": float(np.mean(mpjpe_p95_per_fold)),
-            "mpjpe_p95_std": float(np.std(mpjpe_p95_per_fold)),
-            "global_mpjpe_mean": (
-                float(np.mean(global_mpjpe_per_fold)) if global_mpjpe_per_fold else None
-            ),
-            "global_mpjpe_std": (
-                float(np.std(global_mpjpe_per_fold)) if global_mpjpe_per_fold else None
-            ),
-            "global_mpjpe_p95_mean": (
-                float(np.mean(global_mpjpe_p95_per_fold))
-                if global_mpjpe_p95_per_fold
-                else None
-            ),
-            "global_mpjpe_p95_std": (
-                float(np.std(global_mpjpe_p95_per_fold))
-                if global_mpjpe_p95_per_fold
-                else None
-            ),
-            "per_fold": [
-                {
-                    "fold": m["fold"],
-                    "test_subjects": m["test_subjects"],
-                    "mpjpe": m["mpjpe"],
-                    "mpjpe_p95": m.get("mpjpe_p95", {}),
-                    "global_mpjpe": m.get("global_mpjpe", {}),
-                    "global_mpjpe_p95": m.get("global_mpjpe_p95", {}),
-                    "mae": m.get("mae", {}),
-                    "rmse": m.get("rmse", {}),
-                    "displacement": m.get("displacement", {}),
-                }
-                for m in all_fold_metrics
+    # Subplot 1: Eje X (Avance frontal)
+    axes[0].plot(
+        time_axis, hip_g_cap[:, 0], "k-", linewidth=2, label="ArUco Ground Truth"
+    )
+    axes[0].plot(
+        time_axis, hip_p_cap[:, 0], "r--", linewidth=2, label="Red Neuronal (Autónoma)"
+    )
+    axes[0].set_xlabel("Tiempo (s)")
+    axes[0].set_ylabel("Posición X (m)")
+    axes[0].set_title(
+        f"Desplazamiento Frontal (Eje X) — ATE: {disp['ate_x']*100:.2f} cm",
+        fontweight="bold",
+    )
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+
+    # Subplot 2: Eje Z (Oscilación vertical)
+    axes[1].plot(
+        time_axis, hip_g_cap[:, 2], "k-", linewidth=2, label="ArUco Ground Truth"
+    )
+    axes[1].plot(
+        time_axis, hip_p_cap[:, 2], "b--", linewidth=2, label="Red Neuronal (Autónoma)"
+    )
+    axes[1].set_xlabel("Tiempo (s)")
+    axes[1].set_ylabel("Posición Z (m)")
+    axes[1].set_title(
+        f"Oscilación Vertical (Eje Z) — ATE: {disp['ate_z']*100:.2f} cm",
+        fontweight="bold",
+    )
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+
+    plt.suptitle(
+        f"Análisis de Desplazamiento Pélvico — ATE Global: {disp['ate_mean']*100:.2f} cm │ EPE Deriva Final: {disp['epe_mean']*100:.2f} cm",
+        fontsize=13,
+        fontweight="bold",
+    )
+    plt.tight_layout()
+    fig.savefig(save_dir / "displacement_analysis.png", dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  ✓ {save_dir / 'displacement_analysis.png'}")
+
+    # ── 9. Gráficas de evaluación ────────────────────────────────────
+    print("\n  🎨 Generando gráficas de evaluación...")
+    if eval_metrics:
+        plot_mpjpe_comparison(eval_metrics, RESULTS_DIR)
+        plot_bland_altman_nn(eval_metrics, RESULTS_DIR)
+        plot_error_heatmap(eval_metrics, RESULTS_DIR)
+        plot_displacement_analysis(eval_metrics, RESULTS_DIR)
+
+    if comparison:
+        plot_nn_vs_analytical(comparison, RESULTS_DIR)
+
+    # Trayectorias y animación 3D de ejemplo (primera captura del test set)
+    if len(test_captures) > 0:
+        sample_subject = test_subjects[0]
+        cap = test_captures[0]
+        anthropometric = np.array(
+            [
+                cap["femur_length"] / GaitDataset.BONE_NORM,
+                cap["tibia_length"] / GaitDataset.BONE_NORM,
+                cap["hip_width"] / GaitDataset.BONE_NORM,
+                1.0 if cap["direction"] == "R" else 0.0,
             ],
+            dtype=np.float32,
+        )
+        pred_pose, pred_disp, pred_hip_global, nn_valid = (
+            predict_full_sequence_multitask(
+                model,
+                cap["sensor_data"],
+                anthropometric,
+                norm_stats,
+                window_size=args.window_size,
+                initial_hip=cap["gt_hip"],
+            )
+        )
+        plot_trajectory_comparison(
+            cap,
+            pred_pose,
+            nn_valid,
+            RESULTS_DIR,
+            capture_label=f"test_{sample_subject}_0",
+        )
+
+        anim_gif_path = (
+            RESULTS_DIR / f"3d_animation_nn_vs_aruco_subject_{sample_subject}.gif"
+        )
+        create_3d_animation(
+            cap,
+            pred_pose,
+            nn_valid,
+            anim_gif_path,
+            nn_hip_global=pred_hip_global,
+            title=f"Reconstrucción 3D Autónoma (Red Neuronal vs ArUco) – Sujeto {sample_subject}",
+            interactive=args.animate,
+        )
+
+    # ── 10. Guardar métricas finales ─────────────────────────────────
+    final_metrics = {}
+    if eval_metrics:
+        final_metrics["mpjpe"] = eval_metrics.get("mpjpe", {})
+        final_metrics["mae"] = eval_metrics.get("mae", {})
+        final_metrics["rmse"] = eval_metrics.get("rmse", {})
+        final_metrics["bland_altman"] = eval_metrics.get("bland_altman", {})
+        final_metrics["displacement"] = eval_metrics.get("displacement", {})
+        final_metrics["global_mpjpe"] = eval_metrics.get("global_mpjpe", {})
+        final_metrics["global_mpjpe_p95"] = eval_metrics.get("global_mpjpe_p95", {})
+    if comparison:
+        final_metrics["comparison"] = {
+            "nn_mean_mpjpe": comparison.get("nn_mean", 0),
+            "analytical_mean_mpjpe": comparison.get("analytical_mean", 0),
+            "improvement_pct": comparison.get("improvement_pct", 0),
         }
-        with open(RESULTS_DIR / "cv_aggregate_metrics.json", "w") as f:
-            json.dump(aggregate, f, indent=2, default=str)
-        print(
-            f"  ✅ Métricas agregadas guardadas en {RESULTS_DIR / 'cv_aggregate_metrics.json'}"
-        )
 
-    elif len(all_fold_metrics) == 1:
-        m = all_fold_metrics[0]
-        final_metrics = {
-            "mpjpe": m.get("mpjpe", {}),
-            "rmse": m.get("rmse", {}),
-            "bland_altman": m.get("bland_altman", {}),
-            "displacement": m.get("displacement", {}),
-        }
-        with open(RESULTS_DIR / "final_metrics.json", "w") as f:
-            json.dump(final_metrics, f, indent=2, default=str)
+    with open(RESULTS_DIR / "final_metrics.json", "w") as f:
+        json.dump(final_metrics, f, indent=2, default=str)
 
-    # ── 6. Weight Soup y Prediction Ensemble ─────────────────────────
-    if len(all_fold_metrics) > 1:
-        print(f"\n{'═' * W}")
-        print(f"  🍲 MODELO FINAL: WEIGHT SOUP + PREDICTION ENSEMBLE")
-        print(f"{'═' * W}")
-        print(f"  ℹ️  Nota: estas métricas son in-sample (todos los sujetos")
-        print(f"      participaron en entrenamiento). Las métricas honestas")
-        print(f"      de generalización son las del K-Fold CV de arriba.")
-
-        # Recopilar TODAS las capturas
-        all_captures_list = []
-        for s in subjects_pool:
-            all_captures_list.extend(subjects_data[s])
-
-        # ── Weight Soup: promediar pesos de todos los folds ──
-        soup_state = create_weight_soup(CHECKPOINT_DIR, len(folds))
-        soup_metrics = None
-
-        if soup_state is not None:
-            soup_model = GaitMultiTaskNetTTLLite(
-                input_dim=INPUT_DIM,
-                output_dim=OUTPUT_DIM,
-            ).to(DEVICE)
-            soup_model.load_state_dict(soup_state)
-
-            # Norm stats globales: promedio de los norm_stats de cada fold
-            soup_norm_stats = None
-            n_stats = 0
-            for fold_idx in range(1, len(folds) + 1):
-                ckpt_path = CHECKPOINT_DIR / f"best_ttl_lite_fold{fold_idx}.pt"
-                if not ckpt_path.exists():
-                    continue
-                ckpt = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
-                ns = ckpt.get("norm_stats", None)
-                if ns is not None:
-                    ns_np = {}
-                    for k in ns:
-                        if isinstance(ns[k], torch.Tensor):
-                            ns_np[k] = ns[k].cpu().numpy().astype(np.float32)
-                        elif isinstance(ns[k], list):
-                            ns_np[k] = np.array(ns[k], dtype=np.float32)
-                        else:
-                            ns_np[k] = np.array(ns[k], dtype=np.float32)
-                    if soup_norm_stats is None:
-                        soup_norm_stats = {k: v.copy() for k, v in ns_np.items()}
-                    else:
-                        for k in soup_norm_stats:
-                            soup_norm_stats[k] += ns_np[k]
-                    n_stats += 1
-
-            if soup_norm_stats and n_stats > 0:
-                for k in soup_norm_stats:
-                    soup_norm_stats[k] /= n_stats
-
-            # Actualizar BatchNorm del soup con todos los datos
-            print("  📊 Actualizando BatchNorm del Weight Soup...")
-            all_dataset = GaitDataset(
-                all_captures_list,
-                window_size=args.window_size,
-                stride=args.window_size,  # Sin solapamiento
-                stats=soup_norm_stats,
-            )
-            all_loader = DataLoader(
-                all_dataset,
-                batch_size=args.batch_size,
-                shuffle=False,
-                num_workers=4,
-            )
-
-            # Reset BN running stats y recalcular
-            soup_model.train()
-            with torch.no_grad():
-                for x, _, _, _ in all_loader:
-                    soup_model(x.to(DEVICE))
-            soup_model.eval()
-
-            # Evaluar soup en TODAS las capturas
-            soup_metrics = evaluate_on_captures(
-                soup_model,
-                all_captures_list,
-                soup_norm_stats,
-                label="Weight Soup (Todos los Sujetos)",
-                window_size=args.window_size,
-            )
-
-            # Guardar soup como checkpoint de despliegue
-            torch.save(
-                {
-                    "model_state_dict": {
-                        k: v.cpu() for k, v in soup_model.state_dict().items()
-                    },
-                    "norm_stats": soup_norm_stats,
-                    "type": "weight_soup",
-                    "n_folds": len(folds),
-                },
-                CHECKPOINT_DIR / "best_ttl_lite_soup.pt",
-            )
-            print(
-                f"  ✅ Weight Soup guardado: {CHECKPOINT_DIR / 'best_ttl_lite_soup.pt'}"
-            )
-
-        # ── Prediction Ensemble: promediar salidas de todos los modelos ──
-        model_factory = lambda: GaitMultiTaskNetTTLLite(
-            input_dim=INPUT_DIM,
-            output_dim=OUTPUT_DIM,
-        )
-        models_and_stats = load_fold_models(
-            CHECKPOINT_DIR,
-            len(folds),
-            model_factory,
-        )
-
-        ensemble_metrics = None
-        if len(models_and_stats) > 1:
-            ensemble_metrics = evaluate_ensemble_on_captures(
-                models_and_stats,
-                all_captures_list,
-                label="Prediction Ensemble (Todos los Sujetos)",
-                window_size=args.window_size,
-            )
-
-        # ── Tabla comparativa ──
-        print(f"\n{'═' * W}")
-        print(f"  📊 COMPARACIÓN: K-Fold CV vs Weight Soup vs Ensemble")
-        print(f"{'═' * W}")
-        cv_mpjpe = np.mean([m["mpjpe"]["mean"] for m in all_fold_metrics])
-        cv_std = np.std([m["mpjpe"]["mean"] for m in all_fold_metrics])
-        cv_g_vals = [
-            m["global_mpjpe_p95"]["mean"]
-            for m in all_fold_metrics
-            if "global_mpjpe_p95" in m
-        ]
-        cv_g_p95 = np.mean(cv_g_vals) if cv_g_vals else float("nan")
-        cv_g_std = np.std(cv_g_vals) if cv_g_vals else float("nan")
-
-        print(f"  {'Método':<32}  {'MPJPE Rel (m)':>16}  {'Global 3D P95 (m)':>18}")
-        print(f"  {'─' * 32}  {'─' * 16}  {'─' * 18}")
-        print(
-            f"  {'K-Fold CV (generalización)':<32}  {cv_mpjpe:>12.4f} ± {cv_std:.4f}  {cv_g_p95:>14.4f} ± {cv_g_std:.4f}"
-        )
-        if soup_metrics and "mpjpe" in soup_metrics:
-            s_rel = soup_metrics["mpjpe"]["mean"]
-            s_glob = soup_metrics.get("global_mpjpe_p95", {}).get("mean", float("nan"))
-            print(f"  {'Weight Soup (in-sample)':<32}  {s_rel:>16.4f}  {s_glob:>18.4f}")
-        if ensemble_metrics and "mpjpe" in ensemble_metrics:
-            e_rel = ensemble_metrics["mpjpe"]["mean"]
-            e_glob = ensemble_metrics.get("global_mpjpe_p95", {}).get(
-                "mean", float("nan")
-            )
-            print(
-                f"  {'Prediction Ensemble (in-sample)':<32}  {e_rel:>16.4f}  {e_glob:>18.4f}"
-            )
-        print(f"{'═' * W}")
-
-        # Guardar ensemble metrics en el JSON agregado
-        agg_path = RESULTS_DIR / "cv_aggregate_metrics.json"
-        if agg_path.exists():
-            with open(agg_path, "r") as f:
-                agg_data = json.load(f)
-            if soup_metrics:
-                agg_data["weight_soup"] = {
-                    "mpjpe": soup_metrics.get("mpjpe", {}),
-                    "mpjpe_p95": soup_metrics.get("mpjpe_p95", {}),
-                    "global_mpjpe": soup_metrics.get("global_mpjpe", {}),
-                    "global_mpjpe_p95": soup_metrics.get("global_mpjpe_p95", {}),
-                    "mae": soup_metrics.get("mae", {}),
-                    "rmse": soup_metrics.get("rmse", {}),
-                    "displacement": soup_metrics.get("displacement", {}),
-                }
-            if ensemble_metrics:
-                agg_data["prediction_ensemble"] = {
-                    "mpjpe": ensemble_metrics.get("mpjpe", {}),
-                    "mpjpe_p95": ensemble_metrics.get("mpjpe_p95", {}),
-                    "global_mpjpe": ensemble_metrics.get("global_mpjpe", {}),
-                    "global_mpjpe_p95": ensemble_metrics.get("global_mpjpe_p95", {}),
-                    "mae": ensemble_metrics.get("mae", {}),
-                    "rmse": ensemble_metrics.get("rmse", {}),
-                    "displacement": ensemble_metrics.get("displacement", {}),
-                }
-            with open(agg_path, "w") as f:
-                json.dump(agg_data, f, indent=2, default=str)
-
+    # ── Resumen final ────────────────────────────────────────────────
     print()
     print("═" * W)
     print("  ✅ PROCESAMIENTO COMPLETO")
     print("═" * W)
-    print(f"  Resultados guardados en: {RESULTS_DIR.resolve()}")
-    if len(all_fold_metrics) > 1:
-        print(f"  Modelo despliegue:       {CHECKPOINT_DIR / 'best_ttl_lite_soup.pt'}")
+    print(f"  Resultados guardados en:   {RESULTS_DIR.resolve()}")
+    print(f"  Modelo guardado en:        {CHECKPOINT_DIR.resolve()}")
+    if eval_metrics:
+        print(f"  MPJPE (test):              " f"{eval_metrics['mpjpe']['mean']:.4f} m")
+    if comparison:
+        print(f"  MPJPE NN:                  {comparison['nn_mean']:.4f} m")
+        print(f"  MPJPE Analítico:           " f"{comparison['analytical_mean']:.4f} m")
+        print(f"  Mejora:                    " f"{comparison['improvement_pct']:+.1f}%")
     print("═" * W)
 
 

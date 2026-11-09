@@ -32,8 +32,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # Importar modelos y utilidades existentes
-from nn_pivot_classifier import GaitStaticPivotNet
-from nn_static_pivot import (
+from models.nn_pivot_classifier import GaitStaticPivotNet
+from models.nn_static_pivot import (
     GaitStaticNet,
     GaitStaticDataset,
     discover_captures,
@@ -49,15 +49,15 @@ from process_all import (
     adjust_aruco_data,
     low_pass_filter,
 )
-from nn_transformer_multitask import (
+from models.nn_transformer_multitask import (
     GaitMultiTaskNet,
     predict_full_sequence_multitask as predict_trans,
 )
-from nn_tcn_lite import (
+from models.nn_tcn_lite import (
     GaitMultiTaskNetTCN,
     predict_full_sequence_multitask as predict_tcn,
 )
-from nn_ttl_lite import (
+from models.nn_ttl_lite import (
     GaitMultiTaskNetTTLLite,
     predict_full_sequence_multitask as predict_ttl,
 )
