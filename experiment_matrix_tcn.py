@@ -369,6 +369,7 @@ def run_single_experiment(
         norm_stats,
         label=f"Exp_{exp_id}_Test",
         file_paths=test_file_paths,
+        window_size=window_size,
     )
 
     mpjpe = eval_metrics.get("mpjpe", {})

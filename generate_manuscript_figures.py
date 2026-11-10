@@ -167,10 +167,14 @@ def run_pipeline_evaluation(use_cache: bool = True):
         ckpt_tcn["model_state_dict"] if "model_state_dict" in ckpt_tcn else ckpt_tcn
     )
 
-    with open(Path("nn-results/tcn_lite/checkpoints/norm_stats.json"), "r") as f:
-        norm_stats_tcn = json.load(f)
+    # norm_stats del propio checkpoint; el .json compartido puede venir de otro entrenamiento
+    if ckpt_tcn.get("norm_stats") is not None:
+        norm_stats_tcn = dict(ckpt_tcn["norm_stats"])
+    else:
+        with open(tcn_ckpt_path.parent / "norm_stats.json", "r") as f:
+            norm_stats_tcn = json.load(f)
     for k in ["mean", "std"]:
-        norm_stats_tcn[k] = np.array(norm_stats_tcn[k], dtype=np.float32)
+        norm_stats_tcn[k] = np.asarray(norm_stats_tcn[k], dtype=np.float32)
 
     in_dim_tcn = (
         state_tcn["input_proj.0.weight"].shape[1]
@@ -184,7 +188,10 @@ def run_pipeline_evaluation(use_cache: bool = True):
     )
     tcn_ch = [state_tcn[f"tcn_blocks.{i}.conv.weight"].shape[0] for i in range(num_tcn)]
     tcn_k = [state_tcn[f"tcn_blocks.{i}.conv.weight"].shape[2] for i in range(num_tcn)]
-    tcn_d = [2**i for i in range(num_tcn)]
+    tcn_d = (ckpt_tcn.get("config") or {}).get(
+        "tcn_dilations", [2**i for i in range(num_tcn)]
+    )
+    window_size_tcn = eval_module.resolve_window_size(None, ckpt_tcn, "TCN Lite")
     head_h_tcn = (
         state_tcn["pose_head.1.weight"].shape[0]
         if "pose_head.1.weight" in state_tcn
@@ -268,7 +275,7 @@ def run_pipeline_evaluation(use_cache: bool = True):
                 sensor_raw,
                 anthro_4d,
                 norm_stats_tcn,
-                window_size=50,
+                window_size=window_size_tcn,
                 initial_hip=gt_pelvis_0,
             )
             tcn_global = np.zeros_like(pred_pose_tcn)

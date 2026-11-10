@@ -84,6 +84,9 @@ TRANS_CKPT_PATH = Path(
 TCN_STATS_PATH = Path("nn-results/tcn_lite/checkpoints/norm_stats.json")
 TTL_STATS_PATH = Path("nn-results/ttl_lite/checkpoints/norm_stats.json")
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Ventana con la que se entrenaron los checkpoints actuales (verificado con sus norm_stats
+# y val_loss); se usa solo si el checkpoint no guarda su propia configuración.
+DEFAULT_TRAIN_WINDOW_SIZE = 25
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -292,6 +295,22 @@ def compute_rmse(
 # ═══════════════════════════════════════════════════════════════════════
 #  CARGA DE MODELOS NEURONALES
 # ═══════════════════════════════════════════════════════════════════════
+
+
+def resolve_window_size(cli_value, ckpt: dict, label: str) -> int:
+    """Ventana de inferencia: CLI > config del checkpoint > DEFAULT_TRAIN_WINDOW_SIZE."""
+    config = ckpt.get("config") or {}
+    if cli_value is not None:
+        ws = cli_value
+        if "window_size" in config and config["window_size"] != cli_value:
+            print(
+                f"  ⚠️ {label}: ventana {cli_value} distinta a la de entrenamiento "
+                f"({config['window_size']})"
+            )
+    else:
+        ws = config.get("window_size", DEFAULT_TRAIN_WINDOW_SIZE)
+    print(f"  ✓ {label}: ventana de inferencia = {ws}")
+    return ws
 
 
 def load_pivot_model(ckpt_path: Path):
@@ -729,20 +748,20 @@ def main():
     parser.add_argument(
         "--window-size-tcn",
         type=int,
-        default=50,
-        help="Tamaño de ventana para TCN Lite (default: 50)",
+        default=None,
+        help="Tamaño de ventana para TCN Lite (default: el guardado en el checkpoint, o 25)",
     )
     parser.add_argument(
         "--window-size-ttl",
         type=int,
-        default=150,
-        help="Tamaño de ventana para TTL Lite (default: 150)",
+        default=None,
+        help="Tamaño de ventana para TTL Lite (default: el guardado en el checkpoint, o 25)",
     )
     parser.add_argument(
         "--window-size-trans",
         type=int,
-        default=150,
-        help="Tamaño de ventana para Transformer (default: 150)",
+        default=None,
+        help="Tamaño de ventana para Transformer (default: el guardado en el checkpoint, o 25)",
     )
     parser.add_argument(
         "--anim-frames",
@@ -813,7 +832,9 @@ def main():
     )
     tcn_ch = [state_tcn[f"tcn_blocks.{i}.conv.weight"].shape[0] for i in range(num_tcn)]
     tcn_k = [state_tcn[f"tcn_blocks.{i}.conv.weight"].shape[2] for i in range(num_tcn)]
-    tcn_d = [2**i for i in range(num_tcn)]
+    tcn_d = (ckpt_tcn.get("config") or {}).get(
+        "tcn_dilations", [2**i for i in range(num_tcn)]
+    )
     head_h_tcn = (
         state_tcn["pose_head.1.weight"].shape[0]
         if "pose_head.1.weight" in state_tcn
@@ -849,7 +870,9 @@ def main():
     )
     ttl_ch = [state_ttl[f"tcn_blocks.{i}.conv.weight"].shape[0] for i in range(num_ttl)]
     ttl_k = [state_ttl[f"tcn_blocks.{i}.conv.weight"].shape[2] for i in range(num_ttl)]
-    ttl_d = [2**i for i in range(num_ttl)]
+    ttl_d = (ckpt_ttl.get("config") or {}).get(
+        "tcn_dilations", [2**i for i in range(num_ttl)]
+    )
     lstm_h_ttl = state_ttl["lstm.weight_hh_l0"].shape[1]
     lstm_l_ttl = sum(
         1 for k in state_ttl if k.startswith("lstm.weight_ih_l") and "reverse" not in k
@@ -871,6 +894,7 @@ def main():
         tcn_dilations=ttl_d,
         lstm_hidden=lstm_h_ttl,
         lstm_layers=lstm_l_ttl,
+        n_heads=(ckpt_ttl.get("config") or {}).get("n_heads", 2),
         n_attn_layers=attn_l_ttl,
         head_hidden_dim=head_h_ttl,
     ).to(DEVICE)
@@ -925,6 +949,7 @@ def main():
         cnn_channels=cnn_ch_trans,
         lstm_hidden=lstm_hidden_trans,
         lstm_layers=lstm_layers_trans,
+        n_heads=(ckpt_trans.get("config") or {}).get("n_heads", 12),
         n_attn_layers=n_attn_layers_trans,
     ).to(DEVICE)
     trans_model.load_state_dict(state_trans)
@@ -934,6 +959,12 @@ def main():
         norm_stats_trans = ckpt_trans["norm_stats"]
     else:
         norm_stats_trans = norm_stats_tcn
+
+    args.window_size_tcn = resolve_window_size(args.window_size_tcn, ckpt_tcn, "TCN Lite")
+    args.window_size_ttl = resolve_window_size(args.window_size_ttl, ckpt_ttl, "TTL Lite")
+    args.window_size_trans = resolve_window_size(
+        args.window_size_trans, ckpt_trans, "Transformer"
+    )
 
     # 2. Descubrir y dividir Dataset por Sujetos
     print("\n  📂 Descubriendo capturas y preparando conjunto de Test...")
