@@ -167,10 +167,14 @@ def run_pipeline_evaluation(use_cache: bool = True):
         ckpt_tcn["model_state_dict"] if "model_state_dict" in ckpt_tcn else ckpt_tcn
     )
 
-    with open(Path("nn-results/tcn_lite/checkpoints/norm_stats.json"), "r") as f:
-        norm_stats_tcn = json.load(f)
+    # norm_stats del propio checkpoint; el .json compartido puede venir de otro entrenamiento
+    if ckpt_tcn.get("norm_stats") is not None:
+        norm_stats_tcn = dict(ckpt_tcn["norm_stats"])
+    else:
+        with open(tcn_ckpt_path.parent / "norm_stats.json", "r") as f:
+            norm_stats_tcn = json.load(f)
     for k in ["mean", "std"]:
-        norm_stats_tcn[k] = np.array(norm_stats_tcn[k], dtype=np.float32)
+        norm_stats_tcn[k] = np.asarray(norm_stats_tcn[k], dtype=np.float32)
 
     in_dim_tcn = (
         state_tcn["input_proj.0.weight"].shape[1]
