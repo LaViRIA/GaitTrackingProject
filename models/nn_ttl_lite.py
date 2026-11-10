@@ -2977,7 +2977,7 @@ def main():
         with open(CHECKPOINT_DIR / "norm_stats.json", "w") as f:
             json.dump(stats_to_save, f)
 
-        # Guardar norm_stats también dentro del checkpoint .pt (evita bugs de float64)
+        # Guardar norm_stats y la configuración real dentro del checkpoint .pt (evita bugs de float64)
         ckpt_path = (
             CHECKPOINT_DIR / f"best_ttl_lite_{args.checkpoint_tag}.pt"
             if args.checkpoint_tag
@@ -2986,6 +2986,29 @@ def main():
         if ckpt_path.exists():
             ckpt = torch.load(ckpt_path, weights_only=False)
             ckpt["norm_stats"] = {"mean": norm_stats["mean"], "std": norm_stats["std"]}
+            ckpt["config"] = {
+                "window_size": args.window_size,
+                "window_stride": args.window_stride,
+                "batch_size": args.batch_size,
+                "lr": args.lr,
+                "epochs": args.epochs,
+                "patience": args.patience,
+                "seed": args.seed,
+                "cutoff_freq": CUTOFF_FREQ,
+                "filter_order": FILTER_ORDER,
+                "train_subjects": train_subjects,
+                "val_subjects": val_subjects,
+                "test_subjects": test_subjects,
+                "tcn_channels": TCN_CHANNELS,
+                "tcn_kernel_sizes": TCN_KERNEL_SIZES,
+                "tcn_dilations": TCN_DILATIONS,
+                "lstm_hidden": LSTM_HIDDEN,
+                "lstm_layers": LSTM_LAYERS,
+                "n_heads": N_ATTENTION_HEADS,
+                "n_attn_layers": N_ATTENTION_LAYERS,
+                "head_hidden_dim": HEAD_HIDDEN_DIM,
+                "dropout": DROPOUT,
+            }
             torch.save(ckpt, ckpt_path)
 
         # Guardar historial

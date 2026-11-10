@@ -184,7 +184,10 @@ def run_pipeline_evaluation(use_cache: bool = True):
     )
     tcn_ch = [state_tcn[f"tcn_blocks.{i}.conv.weight"].shape[0] for i in range(num_tcn)]
     tcn_k = [state_tcn[f"tcn_blocks.{i}.conv.weight"].shape[2] for i in range(num_tcn)]
-    tcn_d = [2**i for i in range(num_tcn)]
+    tcn_d = (ckpt_tcn.get("config") or {}).get(
+        "tcn_dilations", [2**i for i in range(num_tcn)]
+    )
+    window_size_tcn = eval_module.resolve_window_size(None, ckpt_tcn, "TCN Lite")
     head_h_tcn = (
         state_tcn["pose_head.1.weight"].shape[0]
         if "pose_head.1.weight" in state_tcn
@@ -268,7 +271,7 @@ def run_pipeline_evaluation(use_cache: bool = True):
                 sensor_raw,
                 anthro_4d,
                 norm_stats_tcn,
-                window_size=50,
+                window_size=window_size_tcn,
                 initial_hip=gt_pelvis_0,
             )
             tcn_global = np.zeros_like(pred_pose_tcn)
