@@ -142,7 +142,7 @@ flowchart TD
 Todos los checkpoints se organizan en `nn-results/<tipo>/checkpoints/`.
 
 #### 📄 `models/nn_tcn_lite.py`
-* **Arquitectura:** `GaitMultiTaskNetTCN` = **Backbone TCN Causal Dilatada (Temporal Convolutional Network)** con conexiones residuales y cabezal multitarea (Pose 3D + Desplazamiento pélvico).
+* **Arquitectura:** `GaitMultiTaskNetTCN` = **Backbone TCN Dilatada no causal (Temporal Convolutional Network, padding simétrico)** con conexiones residuales y cabezal multitarea (Pose 3D + Desplazamiento pélvico).
 * **Propósito:** Reconstrucción cinemática 3D completa y continua del tren inferior con baja latencia y alta eficiencia temporal. Es el modelo propuesto en el manuscrito.
 * **Salidas:** Pose 3D de 6 articulaciones (18 valores) + traslación frame a frame `[dx, dy, dz]`.
 * **Directorio de salida:** `nn-results/tcn_lite/` (checkpoints en `nn-results/tcn_lite/checkpoints/best_tcn_lite.pt`).
@@ -191,7 +191,7 @@ Todos los checkpoints se organizan en `nn-results/<tipo>/checkpoints/`.
 | **Generar la división de sujetos** | `python generate_split.py` | `data_split.json` |
 | **Optimizar hiperparámetros analíticos** (Grid Search paralelo) | `python experiment_matrix.py` | `Results/experiment_matrix/` |
 | **Graficar heatmaps y análisis de los hiperparámetros** | `python analyze_results.py` | `Results/analysis/` |
-| **Entrenar la red TCN Causal Ligera** | `python -m models.nn_tcn_lite --epochs 200` | `nn-results/tcn_lite/checkpoints/` |
+| **Entrenar la red TCN Ligera (no causal)** | `python -m models.nn_tcn_lite --epochs 200` | `nn-results/tcn_lite/checkpoints/` |
 | **Entrenar la red Híbrida TCN + Transformer** | `python -m models.nn_ttl_lite --epochs 200` | `nn-results/ttl_lite/checkpoints/` |
 | **Entrenar la red BiLSTM + Transformer** | `python -m models.nn_transformer_multitask` | `nn-results/transformer_multitask/checkpoints/` |
 | **Entrenar el clasificador de pie de apoyo (Pivote)** | `python -m models.nn_pivot_classifier` | `nn-results/pivot_classifier/checkpoints/` |

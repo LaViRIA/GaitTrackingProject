@@ -14,7 +14,7 @@ generate_manuscript_figures.py         Figuras del manuscrito (v2_manuscript/fig
 generate_split.py, data_split.json     División fija de sujetos train/val/test
 
 models/                                Redes neuronales (entrenamiento + clases usadas en la evaluación)
-  nn_tcn_lite.py                       TCN causal dilatada (modelo propuesto)
+  nn_tcn_lite.py                       TCN dilatada no causal (modelo propuesto)
   nn_ttl_lite.py                       Híbrido TCN + Transformer
   nn_transformer_multitask.py          Conv1D + BiLSTM + Transformer
   nn_pivot_classifier.py               Clasificador de pie de apoyo

@@ -3,7 +3,7 @@ Red Neuronal: Clasificador de Pie Pivote (Pivot Classifier)
 ===========================================================
 Arquitectura:
   - Red Feed-Forward Multicapa (MLP) con BatchNorm + Dropout + LeakyReLU.
-  - Modelo alternativo opcional: TCN 1D Causal de clasificación temporal (GaitTCNPivotNet).
+  - Modelo alternativo opcional: TCN 1D no causal de clasificación temporal (GaitTCNPivotNet).
   - Entrada: Vector concat de lecturas instantáneas IMU (24 características: acel, giro de 4 sensores) + 4 medidas antropométricas.
   - Salida: Probabilidad Sigmoide binaria (1.0 = Pie Derecho en apoyo, 0.0 = Pie Izquierdo en apoyo).
   - Función de pérdida: Binary Cross Entropy con regularización L2.
