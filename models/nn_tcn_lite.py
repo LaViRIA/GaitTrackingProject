@@ -2,7 +2,7 @@
 Red Neuronal: TCN Lite (Temporal Convolutional Network)
 =======================================================
 Arquitectura:
-  - Temporal Convolutional Network (TCN) causal con convoluciones 1D dilatadas.
+  - Temporal Convolutional Network (TCN) no causal con convoluciones 1D dilatadas (padding simétrico).
   - Bloques residuales con Dilated Conv1D + BatchNorm + ReLU + Dropout.
   - Cabezal Multitarea:
       1. Rama de Pose Relativa: [batch, seq, 18] (6 articulaciones x 3 coords).

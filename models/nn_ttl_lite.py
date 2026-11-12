@@ -3,7 +3,7 @@ Red Neuronal: TTL Lite (TCN + Transformer Lite)
 ==============================================
 Arquitectura:
   - Red Híbrida compuesta por:
-      1. Extractor local TCN (Convoluciones 1D causales dilatadas).
+      1. Extractor local TCN (Convoluciones 1D dilatadas no causales, padding simétrico).
       2. Capa BiLSTM recurrente para contexto bidireccional secuencial.
       3. Transformer Encoder con Multi-Head Self-Attention para correlaciones de largo alcance.
       4. Cabezal de regresión Multitarea (Pose 3D + Desplazamiento global).
