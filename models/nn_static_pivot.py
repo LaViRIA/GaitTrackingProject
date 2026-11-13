@@ -1232,6 +1232,22 @@ def main():
     )
 
     model = GaitStaticNet().to(DEVICE)
+
+    # Configuración real del entrenamiento, se guarda dentro del checkpoint .pt
+    train_config = {
+        "batch_size": args.batch_size,
+        "lr": args.lr,
+        "epochs": args.epochs,
+        "patience": args.patience,
+        "seed": args.seed,
+        "cutoff_freq": CUTOFF_FREQ,
+        "filter_order": FILTER_ORDER,
+        "train_subjects": train_subjs,
+        "val_subjects": val_subjs,
+        "test_subjects": test_subjs,
+        "hidden_layers": HIDDEN_LAYERS,
+        "dropout_rates": DROPOUT_RATES,
+    }
     print_model_summary(model)
 
     ckpt_name = (
@@ -1295,7 +1311,13 @@ def main():
                 best_epoch = epoch
                 patience_counter = 0
                 torch.save(
-                    {"model_state_dict": model.state_dict(), "norm_stats": norm_stats},
+                    {
+                        "model_state_dict": model.state_dict(),
+                        "norm_stats": norm_stats,
+                        "epoch": epoch,
+                        "val_loss": val_loss,
+                        "config": train_config,
+                    },
                     ckpt_path,
                 )
                 print(

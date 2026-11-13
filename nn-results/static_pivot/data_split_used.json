@@ -1,5 +1,5 @@
 {
-  "source": "/home/badajoz/Documents/GaitTrakingProyect/data_split.json",
+  "source": "data_split.json",
   "train_subjects": [
     25,
     1,
