@@ -951,6 +951,22 @@ def main():
     )
 
     model = GaitStaticPivotNet().to(DEVICE)
+
+    # Configuración real del entrenamiento, se guarda dentro del checkpoint .pt
+    train_config = {
+        "batch_size": args.batch_size,
+        "lr": args.lr,
+        "epochs": args.epochs,
+        "patience": args.patience,
+        "seed": args.seed,
+        "cutoff_freq": CUTOFF_FREQ,
+        "filter_order": FILTER_ORDER,
+        "train_subjects": train_subjs,
+        "val_subjects": val_subjs,
+        "test_subjects": test_subjs,
+        "hidden_layers": HIDDEN_LAYERS,
+        "dropout_rates": DROPOUT_RATES,
+    }
     print_model_summary(model)
 
     ckpt_name = (
@@ -1031,6 +1047,7 @@ def main():
                         "epoch": epoch,
                         "val_loss": val_loss,
                         "val_acc": val_acc,
+                        "config": train_config,
                     },
                     ckpt_path,
                 )
