@@ -1,19 +1,19 @@
 """
-Análisis de Resultados de la Matriz de Experimentación
+Analysis of the experiment-matrix results
 =======================================================
 
-Lee el CSV generado por experiment_matrix.py y produce:
-  1. Reporte en consola (Top-N mejores/peores combinaciones)
-  2. Heatmaps por pares de hiperparámetros
-  3. Gráficas de tendencia (error vs cada hiperparámetro)
-  4. Box plots por hiperparámetro
-  5. Matriz de correlación entre parámetros y error
-  6. Tabla resumen (imagen)
-  7. Análisis de sensibilidad (varianza explicada por parámetro)
+Reads the CSV produced by experiment_matrix.py and produces:
+  1. Console report (top-N best/worst combinations)
+  2. Heatmaps for pairs of hyperparameters
+  3. Trend plots (error vs each hyperparameter)
+  4. Box plots per hyperparameter
+  5. Correlation matrix between parameters and error
+  6. Summary table (image)
+  7. Sensitivity analysis (variance explained per parameter)
 
-Uso:
-  python analyze_results.py                          # usa CSV por defecto
-  python analyze_results.py ruta/al/archivo.csv      # CSV específico
+Usage:
+  python analyze_results.py                          # uses the default CSV
+  python analyze_results.py path/to/file.csv         # specific CSV
 """
 
 import csv
@@ -24,12 +24,12 @@ from pathlib import Path
 from collections import defaultdict
 
 # ─────────────────────────────────────────────────────────────
-# Configuración
+# Configuration
 # ─────────────────────────────────────────────────────────────
 DEFAULT_CSV = Path("Results/experiment_matrix/experiment_matrix.csv")
 OUTPUT_DIR = Path("Results/analysis")
 
-# Columnas de hiperparámetros y métricas
+# Hyperparameter and metric columns
 HYPERPARAM_COLS = [
     "cutoff_freq",
     "filter_order",
@@ -58,7 +58,7 @@ METRIC_COLS = [
 # 1. Leer CSV
 # ─────────────────────────────────────────────────────────────
 def read_csv(filepath: Path) -> list[dict]:
-    """Lee el CSV con delimitador ';' y convierte los tipos numéricos."""
+    """Read the CSV with ';' delimiter and convert the numeric types."""
     results = []
     with open(filepath, "r") as f:
         reader = csv.DictReader(f, delimiter=";")
@@ -67,7 +67,7 @@ def read_csv(filepath: Path) -> list[dict]:
             for key, val in row.items():
                 key = key.strip()
                 val = val.strip()
-                # Intentar convertir a número
+                # Try to convert to a number
                 if key == "fusion_filter":
                     parsed[key] = val
                 else:
@@ -83,25 +83,25 @@ def read_csv(filepath: Path) -> list[dict]:
 
 
 # ─────────────────────────────────────────────────────────────
-# 2. Reporte en consola
+# 2. Console report
 # ─────────────────────────────────────────────────────────────
 def print_summary(results: list[dict]):
-    """Imprime estadísticas generales del CSV."""
+    """Print general statistics of the CSV."""
     errors = np.array([r["mean_error"] for r in results])
     print(f"\n{'═' * 70}")
-    print(f"  RESUMEN DEL DATASET")
+    print(f"  DATASET SUMMARY")
     print(f"{'═' * 70}")
-    print(f"  Total de combinaciones:    {len(results)}")
-    print(f"  Error medio global:        {errors.mean():.6f} m")
-    print(f"  Error mediana:             {np.median(errors):.6f} m")
-    print(f"  Desv. estándar del error:  {errors.std():.6f} m")
-    print(f"  Error mínimo:              {errors.min():.6f} m")
-    print(f"  Error máximo:              {errors.max():.6f} m")
-    print(f"  Rango:                     {errors.max() - errors.min():.6f} m")
+    print(f"  Total combinations:        {len(results)}")
+    print(f"  Global mean error:         {errors.mean():.6f} m")
+    print(f"  Median error:              {np.median(errors):.6f} m")
+    print(f"  Error std. deviation:      {errors.std():.6f} m")
+    print(f"  Minimum error:             {errors.min():.6f} m")
+    print(f"  Maximum error:             {errors.max():.6f} m")
+    print(f"  Range:                     {errors.max() - errors.min():.6f} m")
     print(f"{'═' * 70}")
 
-    # Valores únicos por hiperparámetro
-    print(f"\n  Valores únicos por hiperparámetro:")
+    # Unique values per hyperparameter
+    print(f"\n  Unique values per hyperparameter:")
     print(f"  {'─' * 50}")
     for col in HYPERPARAM_COLS:
         unique_vals = sorted(set(str(r[col]) for r in results))
@@ -110,18 +110,18 @@ def print_summary(results: list[dict]):
 
 
 def print_top_n(results: list[dict], n: int = 10):
-    """Imprime las Top-N mejores y peores combinaciones."""
+    """Print the top-N best and worst combinations."""
     sorted_results = sorted(results, key=lambda r: r["mean_error"])
 
     print(f"\n{'═' * 120}")
-    print(f"  ✅ Top-{n} MEJORES Combinaciones de Hiperparámetros")
+    print(f"  ✅ Top-{n} BEST hyperparameter combinations")
     print(f"{'═' * 120}")
     _print_table_header()
     for i, r in enumerate(sorted_results[:n]):
         _print_table_row(i + 1, r)
     print(f"{'═' * 120}")
 
-    print(f"\n  ❌ Bottom-{n} PEORES Combinaciones")
+    print(f"\n  ❌ Bottom-{n} WORST combinations")
     print(f"{'─' * 120}")
     _print_table_header()
     for i, r in enumerate(sorted_results[-n:]):
@@ -133,7 +133,7 @@ def _print_table_header():
     print(
         f"  {'#':>3}  {'Cutoff':>6}  {'Order':>5}  {'PCA%':>4}  {'Gain':>6}  "
         f"{'Slerp':>5}  {'CalSamp':>7}  {'Filter':>8}  {'Pivot':>6}  "
-        f"{'Swing':>5}  {'Error Medio':>11}  {'Std':>8}  {'PerPoint':>10}"
+        f"{'Swing':>5}  {'Mean error':>11}  {'Std':>8}  {'PerPoint':>10}"
     )
     print(
         f"  {'─' * 3}  {'─' * 6}  {'─' * 5}  {'─' * 4}  {'─' * 6}  "
@@ -154,12 +154,12 @@ def _print_table_row(idx, r):
 
 
 # ─────────────────────────────────────────────────────────────
-# 3. Gráficas de tendencia
+# 3. Trend plots
 # ─────────────────────────────────────────────────────────────
 def plot_trend_lines(results: list[dict], output_dir: Path):
-    """Error promedio vs cada hiperparámetro individual."""
+    """Mean error vs each individual hyperparameter."""
     numeric_params = [p for p in HYPERPARAM_COLS if p != "fusion_filter"]
-    n_params = len(numeric_params) + 1  # +1 para fusion_filter (categórico)
+    n_params = len(numeric_params) + 1  # +1 for fusion_filter (categorical)
     cols = 3
     rows = (n_params + cols - 1) // cols
 
@@ -185,44 +185,44 @@ def plot_trend_lines(results: list[dict], output_dir: Path):
             values, means - stds, means + stds, alpha=0.2, color=colors[idx]
         )
         axes[idx].set_xlabel(param, fontsize=10)
-        axes[idx].set_ylabel("Error Medio (m)", fontsize=9)
+        axes[idx].set_ylabel("Mean error (m)", fontsize=9)
         axes[idx].set_title(param.replace("_", " ").title(), fontsize=11, fontweight="bold")
         axes[idx].grid(True, alpha=0.3)
         axes[idx].set_xticks(values)
 
-    # Fusion filter (categórico)
+    # Fusion filter (categorical)
     idx = len(numeric_params)
     filters = sorted(set(r["fusion_filter"] for r in results))
     filter_means = [np.mean([r["mean_error"] for r in results if r["fusion_filter"] == f]) for f in filters]
     filter_stds = [np.std([r["mean_error"] for r in results if r["fusion_filter"] == f]) for f in filters]
     bar_colors = ["#4472C4", "#ED7D31"][:len(filters)]
     bars = axes[idx].bar(filters, filter_means, yerr=filter_stds, color=bar_colors, alpha=0.85, width=0.4, capsize=5)
-    axes[idx].set_ylabel("Error Medio (m)", fontsize=9)
-    axes[idx].set_title("Filtro de Fusión", fontsize=11, fontweight="bold")
+    axes[idx].set_ylabel("Mean error (m)", fontsize=9)
+    axes[idx].set_title("Fusion filter", fontsize=11, fontweight="bold")
     axes[idx].grid(True, alpha=0.3, axis="y")
     for bar, mean in zip(bars, filter_means):
         axes[idx].text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
                       f"{mean:.5f}", ha="center", va="bottom", fontsize=8)
 
-    # Ocultar ejes sobrantes
+    # Hide the unused axes
     for i in range(idx + 1, len(axes)):
         axes[i].set_visible(False)
 
     plt.suptitle(
-        "Tendencias: Error Medio vs Cada Hiperparámetro",
+        "Trends: mean error vs each hyperparameter",
         fontsize=14, fontweight="bold", y=1.01
     )
     plt.tight_layout()
     fig.savefig(output_dir / "trend_lines.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ Tendencias guardadas: {output_dir / 'trend_lines.png'}")
+    print(f"  ✓ Trends saved: {output_dir / 'trend_lines.png'}")
 
 
 # ─────────────────────────────────────────────────────────────
-# 4. Box plots por hiperparámetro
+# 4. Box plots per hyperparameter
 # ─────────────────────────────────────────────────────────────
 def plot_box_plots(results: list[dict], output_dir: Path):
-    """Box plot de la distribución del error para cada valor de cada hiperparámetro."""
+    """Box plot of the error distribution for each value of each hyperparameter."""
     params_to_plot = HYPERPARAM_COLS
     n_params = len(params_to_plot)
     cols = 3
@@ -248,7 +248,7 @@ def plot_box_plots(results: list[dict], output_dir: Path):
             patch.set_facecolor(color)
 
         axes[idx].set_xlabel(param, fontsize=9)
-        axes[idx].set_ylabel("Error Medio (m)", fontsize=9)
+        axes[idx].set_ylabel("Mean error (m)", fontsize=9)
         axes[idx].set_title(param.replace("_", " ").title(), fontsize=11, fontweight="bold")
         axes[idx].grid(True, alpha=0.3, axis="y")
 
@@ -256,20 +256,20 @@ def plot_box_plots(results: list[dict], output_dir: Path):
         axes[i].set_visible(False)
 
     plt.suptitle(
-        "Distribución del Error por Valor de Cada Hiperparámetro",
+        "Error distribution per value of each hyperparameter",
         fontsize=14, fontweight="bold", y=1.01
     )
     plt.tight_layout()
     fig.savefig(output_dir / "box_plots.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ Box plots guardados: {output_dir / 'box_plots.png'}")
+    print(f"  ✓ Box plots saved: {output_dir / 'box_plots.png'}")
 
 
 # ─────────────────────────────────────────────────────────────
-# 5. Heatmaps por pares de hiperparámetros
+# 5. Heatmaps for pairs of hyperparameters
 # ─────────────────────────────────────────────────────────────
 def plot_pairwise_heatmaps(results: list[dict], output_dir: Path):
-    """Genera heatmaps para pares clave de hiperparámetros."""
+    """Plot heatmaps for key pairs of hyperparameters."""
     pairs = [
         ("cutoff_freq", "filter_order"),
         ("cutoff_freq", "pca_percentile"),
@@ -291,7 +291,7 @@ def plot_pairwise_heatmaps(results: list[dict], output_dir: Path):
                 yi = y_vals.index(r[param_y])
             except ValueError:
                 continue
-            # Promedio si hay múltiples valores
+            # Average if there are several values
             if np.isnan(matrix[yi, xi]):
                 matrix[yi, xi] = r["mean_error"]
             else:
@@ -307,11 +307,11 @@ def plot_pairwise_heatmaps(results: list[dict], output_dir: Path):
         ax.set_xlabel(param_x.replace("_", " ").title(), fontsize=11)
         ax.set_ylabel(param_y.replace("_", " ").title(), fontsize=11)
         ax.set_title(
-            f"Error Medio: {param_x} vs {param_y}",
+            f"Mean error: {param_x} vs {param_y}",
             fontsize=12, fontweight="bold"
         )
 
-        # Anotar valores en celdas
+        # Annotate the cell values
         for i in range(len(y_vals)):
             for j in range(len(x_vals)):
                 if not np.isnan(matrix[i, j]):
@@ -322,21 +322,21 @@ def plot_pairwise_heatmaps(results: list[dict], output_dir: Path):
                         color=text_color, fontsize=8, fontweight="bold"
                     )
 
-        plt.colorbar(im, ax=ax, label="Error Euclidiano Medio (m)")
+        plt.colorbar(im, ax=ax, label="Mean Euclidean error (m)")
         plt.tight_layout()
         fname = f"heatmap_{param_x}_vs_{param_y}.png"
         fig.savefig(output_dir / fname, dpi=200, bbox_inches="tight")
         plt.close(fig)
-        print(f"  ✓ Heatmap guardado: {fname}")
+        print(f"  ✓ Heatmap saved: {fname}")
 
 
 # ─────────────────────────────────────────────────────────────
-# 6. Análisis de sensibilidad
+# 6. Sensitivity analysis
 # ─────────────────────────────────────────────────────────────
 def sensitivity_analysis(results: list[dict], output_dir: Path):
     """
-    Calcula la 'importancia' de cada hiperparámetro midiendo cuánto 
-    varía el error medio al cambiar cada parámetro individualmente.
+    Compute the 'importance' of each hyperparameter by measuring how much
+    the mean error changes when each parameter is varied individually.
     """
     importance = {}
     for param in HYPERPARAM_COLS:
@@ -345,21 +345,21 @@ def sensitivity_analysis(results: list[dict], output_dir: Path):
         for v in values:
             errs = [r["mean_error"] for r in results if str(r[param]) == v]
             group_means.append(np.mean(errs))
-        # Rango del error medio entre los valores del parámetro
+        # Range of the mean error across the parameter values
         importance[param] = max(group_means) - min(group_means)
 
-    # Ordenar por importancia
+    # Sort by importance
     sorted_importance = sorted(importance.items(), key=lambda x: x[1], reverse=True)
 
     print(f"\n{'═' * 60}")
-    print(f"  ANÁLISIS DE SENSIBILIDAD (Rango del error medio)")
+    print(f"  SENSITIVITY ANALYSIS (range of the mean error)")
     print(f"{'═' * 60}")
     for i, (param, imp) in enumerate(sorted_importance):
         bar = "█" * int(imp / max(importance.values()) * 30)
         print(f"  {i + 1:>2}. {param:35s} {imp:.6f} m  {bar}")
     print(f"{'═' * 60}\n")
 
-    # Gráfica de barras
+    # Bar chart
     params = [p.replace("_", "\n") for p, _ in sorted_importance]
     values = [v for _, v in sorted_importance]
 
@@ -375,34 +375,34 @@ def sensitivity_analysis(results: list[dict], output_dir: Path):
             va="center", fontsize=9
         )
 
-    ax.set_xlabel("Rango del Error Medio (m)", fontsize=11)
+    ax.set_xlabel("Range of the mean error (m)", fontsize=11)
     ax.set_title(
-        "Sensibilidad: Impacto de Cada Hiperparámetro en el Error",
+        "Sensitivity: impact of each hyperparameter on the error",
         fontsize=13, fontweight="bold"
     )
     ax.grid(True, alpha=0.3, axis="x")
     plt.tight_layout()
     fig.savefig(output_dir / "sensitivity_analysis.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ Sensibilidad guardada: {output_dir / 'sensitivity_analysis.png'}")
+    print(f"  ✓ Sensitivity saved: {output_dir / 'sensitivity_analysis.png'}")
 
     return sorted_importance
 
 
 # ─────────────────────────────────────────────────────────────
-# 7. Tabla resumen visual
+# 7. Visual summary table
 # ─────────────────────────────────────────────────────────────
 def plot_summary_table(results: list[dict], output_dir: Path, n: int = 15):
-    """Genera una imagen con la tabla resumen de las mejores combinaciones."""
+    """Produce an image with the summary table of the best combinations."""
     sorted_results = sorted(results, key=lambda r: r["mean_error"])[:n]
 
     fig, ax = plt.subplots(figsize=(16, max(3, 0.4 * n + 2)))
     ax.axis("off")
 
     headers = [
-        "#", "Cutoff\n(Hz)", "Orden", "PCA\n%", "Gain", "Slerp\nMin",
+        "#", "Cutoff\n(Hz)", "Order", "PCA\n%", "Gain", "Slerp\nMin",
         "Cal.\nSamples", "Filter", "Pivot\n(m)", "Swing\n(rad/s)",
-        "Error\nMedio", "Std", "Per\nPoint"
+        "Mean\nerror", "Std", "Per\nPoint"
     ]
 
     cell_data = []
@@ -433,12 +433,12 @@ def plot_summary_table(results: list[dict], output_dir: Path, n: int = 15):
     table.set_fontsize(7.5)
     table.scale(1, 1.5)
 
-    # Colorear encabezados
+    # Colour the headers
     for j in range(len(headers)):
         table[0, j].set_facecolor("#2E4057")
         table[0, j].set_text_props(color="white", fontweight="bold")
 
-    # Colorear filas alternas + resaltar la mejor
+    # Colour alternate rows + highlight the best one
     for i in range(len(cell_data)):
         if i == 0:
             color = "#92D050"
@@ -450,20 +450,20 @@ def plot_summary_table(results: list[dict], output_dir: Path, n: int = 15):
             table[i + 1, j].set_facecolor(color)
 
     ax.set_title(
-        f"Top-{n} Mejores Combinaciones de Hiperparámetros",
+        f"Top-{n} best hyperparameter combinations",
         fontsize=14, fontweight="bold", pad=20
     )
     plt.tight_layout()
     fig.savefig(output_dir / "summary_table.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ Tabla resumen guardada: {output_dir / 'summary_table.png'}")
+    print(f"  ✓ Summary table saved: {output_dir / 'summary_table.png'}")
 
 
 # ─────────────────────────────────────────────────────────────
-# 8. Histograma de distribución del error
+# 8. Histogram of the error distribution
 # ─────────────────────────────────────────────────────────────
 def plot_error_distribution(results: list[dict], output_dir: Path):
-    """Histograma de la distribución del error medio."""
+    """Histogram of the mean-error distribution."""
     errors = [r["mean_error"] for r in results]
 
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -472,67 +472,67 @@ def plot_error_distribution(results: list[dict], output_dir: Path):
         errors, bins=n_bins, edgecolor="gray", alpha=0.8, color="#4472C4"
     )
 
-    # Colorear gradiente
+    # Colour gradient
     cm = plt.cm.RdYlGn_r
     norm = plt.Normalize(min(errors), max(errors))
     for patch, val in zip(patches, bins):
         patch.set_facecolor(cm(norm(val)))
 
-    # Líneas de referencia
-    ax.axvline(np.mean(errors), color="red", linestyle="--", linewidth=2, label=f"Media: {np.mean(errors):.5f}")
-    ax.axvline(np.median(errors), color="orange", linestyle="--", linewidth=2, label=f"Mediana: {np.median(errors):.5f}")
+    # Reference lines
+    ax.axvline(np.mean(errors), color="red", linestyle="--", linewidth=2, label=f"Mean: {np.mean(errors):.5f}")
+    ax.axvline(np.median(errors), color="orange", linestyle="--", linewidth=2, label=f"Median: {np.median(errors):.5f}")
 
     best = min(errors)
-    ax.axvline(best, color="green", linestyle="-", linewidth=2, label=f"Mejor: {best:.5f}")
+    ax.axvline(best, color="green", linestyle="-", linewidth=2, label=f"Best: {best:.5f}")
 
-    ax.set_xlabel("Error Medio (m)", fontsize=11)
-    ax.set_ylabel("Frecuencia", fontsize=11)
-    ax.set_title("Distribución del Error Medio en Todas las Combinaciones", fontsize=13, fontweight="bold")
+    ax.set_xlabel("Mean error (m)", fontsize=11)
+    ax.set_ylabel("Frequency", fontsize=11)
+    ax.set_title("Mean-error distribution over all combinations", fontsize=13, fontweight="bold")
     ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3, axis="y")
     plt.tight_layout()
     fig.savefig(output_dir / "error_distribution.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ Distribución guardada: {output_dir / 'error_distribution.png'}")
+    print(f"  ✓ Distribution saved: {output_dir / 'error_distribution.png'}")
 
 
 # ─────────────────────────────────────────────────────────────
-# 9. Mejor combinación detallada
+# 9. Detailed best combination
 # ─────────────────────────────────────────────────────────────
 def print_best_combination(results: list[dict]):
-    """Imprime la mejor combinación con formato destacado."""
+    """Print the best combination with highlighted formatting."""
     best = min(results, key=lambda r: r["mean_error"])
 
     print(f"\n{'═' * 60}")
-    print(f"  🏆 MEJOR COMBINACIÓN ENCONTRADA")
+    print(f"  🏆 BEST COMBINATION FOUND")
     print(f"{'═' * 60}")
-    print(f"  Frecuencia de corte:        {best['cutoff_freq']} Hz")
-    print(f"  Orden del filtro:           {best['filter_order']}")
-    print(f"  Percentil PCA:              {best['pca_percentile']}%")
-    print(f"  Ganancia Madgwick:          {best['madgwick_gain']}")
+    print(f"  Cut-off frequency:          {best['cutoff_freq']} Hz")
+    print(f"  Filter order:               {best['filter_order']}")
+    print(f"  PCA percentile:             {best['pca_percentile']}%")
+    print(f"  Madgwick gain:              {best['madgwick_gain']}")
     print(f"  Slerp clip min:             {best['slerp_clip_min']}")
-    print(f"  Muestras de calibración:    {best['calibration_samples']}")
-    print(f"  Filtro de fusión:           {best['fusion_filter']}")
-    print(f"  Umbral de altura pivote:    {best['pivot_height_threshold']} m")
-    print(f"  Umbral velocidad swing:     {best['swing_velocity_threshold']} rad/s")
+    print(f"  Calibration samples:        {best['calibration_samples']}")
+    print(f"  Fusion filter:              {best['fusion_filter']}")
+    print(f"  Pivot height threshold:     {best['pivot_height_threshold']} m")
+    print(f"  Swing velocity threshold:   {best['swing_velocity_threshold']} rad/s")
     print(f"  {'─' * 40}")
-    print(f"  Error medio:                {best['mean_error']:.6f} m")
-    print(f"  Desv. estándar:             {best['std_error']:.6f} m")
-    print(f"  Error mínimo:               {best['min_error']:.6f} m")
-    print(f"  Error máximo:               {best['max_error']:.6f} m")
-    print(f"  Error medio por punto:      {best['mean_per_point']:.6f} m")
-    print(f"  Archivos válidos:           {best['n_valid']}/{best['n_total']}")
+    print(f"  Mean error:                 {best['mean_error']:.6f} m")
+    print(f"  Std. deviation:             {best['std_error']:.6f} m")
+    print(f"  Minimum error:              {best['min_error']:.6f} m")
+    print(f"  Maximum error:              {best['max_error']:.6f} m")
+    print(f"  Mean error per point:       {best['mean_per_point']:.6f} m")
+    print(f"  Valid files:                {best['n_valid']}/{best['n_total']}")
     print(f"{'═' * 60}\n")
 
     return best
 
 
 # ─────────────────────────────────────────────────────────────
-# 10. Comparación Madgwick vs EKF
+# 10. Madgwick vs EKF comparison
 # ─────────────────────────────────────────────────────────────
 def plot_filter_comparison(results: list[dict], output_dir: Path):
-    """Compara Madgwick vs EKF manteniendo otros parámetros iguales."""
-    # Agrupar por configuración (sin fusion_filter)
+    """Compare Madgwick vs EKF with the other parameters held equal."""
+    # Group by configuration (without fusion_filter)
     groups = defaultdict(dict)
     for r in results:
         key = tuple(
@@ -540,7 +540,7 @@ def plot_filter_comparison(results: list[dict], output_dir: Path):
         )
         groups[key][r["fusion_filter"]] = r["mean_error"]
 
-    # Solo pares donde existan ambos filtros
+    # Only pairs where both filters exist
     madgwick_errs = []
     ekf_errs = []
     for key, filters in groups.items():
@@ -549,7 +549,7 @@ def plot_filter_comparison(results: list[dict], output_dir: Path):
             ekf_errs.append(filters["ekf"])
 
     if not madgwick_errs:
-        print("  ⚠ No hay pares comparables Madgwick vs EKF")
+        print("  ⚠ No comparable Madgwick vs EKF pairs")
         return
 
     madgwick_errs = np.array(madgwick_errs)
@@ -564,20 +564,20 @@ def plot_filter_comparison(results: list[dict], output_dir: Path):
     axes[0].plot([min_val, max_val], [min_val, max_val], "r--", linewidth=1.5, label="y = x")
     axes[0].set_xlabel("Error Madgwick (m)", fontsize=11)
     axes[0].set_ylabel("Error EKF (m)", fontsize=11)
-    axes[0].set_title("Madgwick vs EKF (misma config.)", fontsize=12, fontweight="bold")
+    axes[0].set_title("Madgwick vs EKF (same config.)", fontsize=12, fontweight="bold")
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
     axes[0].set_aspect("equal")
 
-    # Histograma de diferencias
-    diffs = ekf_errs - madgwick_errs  # positivo = Madgwick mejor
+    # Histogram of the differences
+    diffs = ekf_errs - madgwick_errs  # positive = Madgwick better
     axes[1].hist(diffs, bins=40, edgecolor="gray", alpha=0.8, color="#ED7D31")
     axes[1].axvline(0, color="black", linestyle="-", linewidth=1.5)
     axes[1].axvline(np.mean(diffs), color="red", linestyle="--", linewidth=2,
-                    label=f"Media: {np.mean(diffs):.5f}")
-    axes[1].set_xlabel("Diferencia (EKF - Madgwick)", fontsize=11)
-    axes[1].set_ylabel("Frecuencia", fontsize=11)
-    axes[1].set_title("Distribución de Diferencias", fontsize=12, fontweight="bold")
+                    label=f"Mean: {np.mean(diffs):.5f}")
+    axes[1].set_xlabel("Difference (EKF - Madgwick)", fontsize=11)
+    axes[1].set_ylabel("Frequency", fontsize=11)
+    axes[1].set_title("Distribution of the differences", fontsize=12, fontweight="bold")
     axes[1].legend()
     axes[1].grid(True, alpha=0.3, axis="y")
 
@@ -585,36 +585,36 @@ def plot_filter_comparison(results: list[dict], output_dir: Path):
     n_ekf_wins = np.sum(diffs < 0)
     n_ties = np.sum(diffs == 0)
     fig.suptitle(
-        f"Comparación de Filtros: Madgwick gana {n_madgwick_wins}x, "
-        f"EKF gana {n_ekf_wins}x, Empates {n_ties}x",
+        f"Filter comparison: Madgwick wins {n_madgwick_wins}x, "
+        f"EKF wins {n_ekf_wins}x, ties {n_ties}x",
         fontsize=13, fontweight="bold", y=1.02
     )
     plt.tight_layout()
     fig.savefig(output_dir / "filter_comparison.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ Comparación de filtros: {output_dir / 'filter_comparison.png'}")
+    print(f"  ✓ Filter comparison: {output_dir / 'filter_comparison.png'}")
 
 
 # ─────────────────────────────────────────────────────────────
-# 11. Análisis detallado de diferencias por filtro de fusión
+# 11. Detailed analysis of the differences per fusion filter
 # ─────────────────────────────────────────────────────────────
 def analyze_filter_differences(results: list[dict], output_dir: Path):
     """
-    Análisis exhaustivo de las diferencias entre filtros de fusión.
-    Incluye:
-      - Estadísticas descriptivas por filtro
-      - Test de significancia estadística (Mann-Whitney U)
-      - Comparación pareada por hiperparámetro
-      - Visualización multi-panel
+    Thorough analysis of the differences between fusion filters.
+    Includes:
+      - Descriptive statistics per filter
+      - Statistical significance test (Mann-Whitney U)
+      - Paired comparison per hyperparameter
+      - Multi-panel visualization
     """
     from scipy import stats as scipy_stats
 
     filters = sorted(set(r["fusion_filter"] for r in results))
     if len(filters) < 2:
-        print("  ⚠ Solo hay un tipo de filtro de fusión, no se puede comparar.")
+        print("  ⚠ There is only one fusion-filter type; nothing to compare.")
         return
 
-    # ── Estadísticas descriptivas por filtro ──
+    # ── Descriptive statistics per filter ──
     filter_data = {}
     for f in filters:
         errs = np.array([r["mean_error"] for r in results if r["fusion_filter"] == f])
@@ -635,12 +635,12 @@ def analyze_filter_differences(results: list[dict], output_dir: Path):
             "mean_per_point": np.mean(per_point),
         }
 
-    # ── Reporte en consola ──
+    # ── Console report ──
     print(f"\n{'═' * 80}")
-    print(f"  📊 ANÁLISIS DETALLADO: DIFERENCIAS POR FILTRO DE FUSIÓN")
+    print(f"  📊 DETAILED ANALYSIS: DIFFERENCES PER FUSION FILTER")
     print(f"{'═' * 80}")
 
-    print(f"\n  {'Métrica':<30}", end="")
+    print(f"\n  {'Metric':<30}", end="")
     for f in filters:
         print(f"  {f.upper():>12}", end="")
     print(f"  {'Δ (diff)':>12}")
@@ -650,16 +650,16 @@ def analyze_filter_differences(results: list[dict], output_dir: Path):
     print(f"  {'─' * 12}")
 
     metrics_to_show = [
-        ("N combinaciones", "n", "{:d}"),
-        ("Error medio (m)", "mean", "{:.6f}"),
-        ("Mediana error (m)", "median", "{:.6f}"),
-        ("Desv. estándar (m)", "std", "{:.6f}"),
-        ("Error mínimo (m)", "min", "{:.6f}"),
-        ("Error máximo (m)", "max", "{:.6f}"),
-        ("Percentil 25 (m)", "q25", "{:.6f}"),
-        ("Percentil 75 (m)", "q75", "{:.6f}"),
-        ("Rango intercuartil (m)", None, None),
-        ("Error medio por punto (m)", "mean_per_point", "{:.6f}"),
+        ("N combinations", "n", "{:d}"),
+        ("Mean error (m)", "mean", "{:.6f}"),
+        ("Median error (m)", "median", "{:.6f}"),
+        ("Std. deviation (m)", "std", "{:.6f}"),
+        ("Minimum error (m)", "min", "{:.6f}"),
+        ("Maximum error (m)", "max", "{:.6f}"),
+        ("25th percentile (m)", "q25", "{:.6f}"),
+        ("75th percentile (m)", "q75", "{:.6f}"),
+        ("Interquartile range (m)", None, None),
+        ("Mean error per point (m)", "mean_per_point", "{:.6f}"),
     ]
 
     for label, key, fmt in metrics_to_show:
@@ -678,33 +678,33 @@ def analyze_filter_differences(results: list[dict], output_dir: Path):
                 v = filter_data[f][key]
                 print(f"  {v:>12.6f}", end="")
                 vals.append(v)
-        # Diferencia (primer filtro - segundo filtro)
+        # Difference (first filter - second filter)
         diff = vals[0] - vals[1] if len(vals) == 2 else 0
         if fmt == "{:d}":
             print(f"  {diff:>+12d}")
         else:
             print(f"  {diff:>+12.6f}")
 
-    # ── Test de significancia estadística ──
+    # ── Statistical significance test ──
     if len(filters) == 2:
         errs_a = filter_data[filters[0]]["errors"]
         errs_b = filter_data[filters[1]]["errors"]
         u_stat, p_value = scipy_stats.mannwhitneyu(errs_a, errs_b, alternative="two-sided")
 
         print(f"\n  {'─' * 60}")
-        print(f"  Test de significancia (Mann-Whitney U):")
-        print(f"    U-estadístico:  {u_stat:.2f}")
+        print(f"  Significance test (Mann-Whitney U):")
+        print(f"    U statistic:    {u_stat:.2f}")
         print(f"    p-valor:        {p_value:.2e}")
         if p_value < 0.001:
-            print(f"    Resultado:      *** Diferencia MUY significativa (p < 0.001)")
+            print(f"    Result:         *** VERY significant difference (p < 0.001)")
         elif p_value < 0.01:
-            print(f"    Resultado:      ** Diferencia significativa (p < 0.01)")
+            print(f"    Result:         ** Significant difference (p < 0.01)")
         elif p_value < 0.05:
-            print(f"    Resultado:      * Diferencia significativa (p < 0.05)")
+            print(f"    Result:         * Significant difference (p < 0.05)")
         else:
-            print(f"    Resultado:      No significativa (p ≥ 0.05)")
+            print(f"    Result:         Not significant (p ≥ 0.05)")
 
-        # ── Comparación pareada: quién gana con misma configuración ──
+        # ── Paired comparison: which wins with the same configuration ──
         groups = defaultdict(dict)
         for r in results:
             key = tuple(r[p] for p in HYPERPARAM_COLS if p != "fusion_filter")
@@ -728,23 +728,23 @@ def analyze_filter_differences(results: list[dict], output_dir: Path):
                     wins[filters[1]] += 1
                     win_margins[filters[1]].append(abs(diff))
 
-        print(f"\n  Comparación pareada (misma configuración, {total_pairs} pares):")
+        print(f"\n  Paired comparison (same configuration, {total_pairs} pairs):")
         for f in filters:
             pct = (wins[f] / total_pairs * 100) if total_pairs > 0 else 0
             avg_margin = np.mean(win_margins[f]) if win_margins[f] else 0
-            print(f"    {f.upper():>10} gana: {wins[f]:>5}x ({pct:>5.1f}%)  "
-                  f"margen medio: {avg_margin:.6f} m")
+            print(f"    {f.upper():>10} wins: {wins[f]:>5}x ({pct:>5.1f}%)  "
+                  f"mean margin: {avg_margin:.6f} m")
         if ties > 0:
-            print(f"    {'Empates':>10}:     {ties:>5}x ({ties/total_pairs*100:>5.1f}%)")
+            print(f"    {'Ties':>10}:     {ties:>5}x ({ties/total_pairs*100:>5.1f}%)")
 
-    # ── Análisis por hiperparámetro: qué filtro es mejor en cada valor ──
+    # ── Analysis per hyperparameter: which filter is better at each value ──
     numeric_params = [p for p in HYPERPARAM_COLS if p not in ("fusion_filter",)]
 
     print(f"\n  {'─' * 60}")
-    print(f"  Error medio por filtro para cada valor de hiperparámetro:")
+    print(f"  Mean error per filter for each hyperparameter value:")
     print(f"  {'─' * 60}")
 
-    param_comparison = {}  # Para la gráfica
+    param_comparison = {}  # For the plot
     for param in numeric_params:
         values = sorted(set(str(r[param]) for r in results))
         print(f"\n  📌 {param}:")
@@ -763,7 +763,7 @@ def analyze_filter_differences(results: list[dict], output_dir: Path):
                 param_comparison[param]["filter_means"][f].append(m)
                 print(f"  {f}={m:.6f}", end="")
 
-            # Indicar ganador
+            # Mark the winner
             valid = {k: v for k, v in filter_means_for_val.items() if not np.isnan(v)}
             if len(valid) >= 2:
                 best_f = min(valid, key=valid.get)
@@ -774,7 +774,7 @@ def analyze_filter_differences(results: list[dict], output_dir: Path):
 
     print(f"{'═' * 80}\n")
 
-    # ── Visualización multi-panel ──
+    # ── Multi-panel visualization ──
     fig = plt.figure(figsize=(20, 16))
     gs = fig.add_gridspec(3, 2, hspace=0.35, wspace=0.3)
 
@@ -783,7 +783,7 @@ def analyze_filter_differences(results: list[dict], output_dir: Path):
     for i, f in enumerate(filters):
         filter_colors[f] = color_palette[i % len(color_palette)]
 
-    # Panel 1: Violin Plot comparativo
+    # Panel 1: comparative violin plot
     ax1 = fig.add_subplot(gs[0, 0])
     violin_data = [filter_data[f]["errors"] for f in filters]
     parts = ax1.violinplot(violin_data, positions=range(len(filters)),
@@ -795,10 +795,10 @@ def analyze_filter_differences(results: list[dict], output_dir: Path):
     parts["cmedians"].set_color("black")
     ax1.set_xticks(range(len(filters)))
     ax1.set_xticklabels([f.upper() for f in filters], fontsize=11, fontweight="bold")
-    ax1.set_ylabel("Error Medio (m)", fontsize=10)
-    ax1.set_title("Distribución del Error por Filtro (Violin)", fontsize=12, fontweight="bold")
+    ax1.set_ylabel("Mean error (m)", fontsize=10)
+    ax1.set_title("Error distribution per filter (violin)", fontsize=12, fontweight="bold")
     ax1.grid(True, alpha=0.3, axis="y")
-    # Anotar media y mediana
+    # Annotate mean and median
     for i, f in enumerate(filters):
         ax1.annotate(
             f"μ={filter_data[f]['mean']:.5f}\nMd={filter_data[f]['median']:.5f}",
@@ -808,7 +808,7 @@ def analyze_filter_differences(results: list[dict], output_dir: Path):
             bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow", alpha=0.8),
         )
 
-    # Panel 2: Box plot comparativo con notch
+    # Panel 2: comparative box plot with notch
     ax2 = fig.add_subplot(gs[0, 1])
     bp = ax2.boxplot(
         violin_data, labels=[f.upper() for f in filters],
@@ -820,13 +820,13 @@ def analyze_filter_differences(results: list[dict], output_dir: Path):
     for i, patch in enumerate(bp["boxes"]):
         patch.set_facecolor(filter_colors[filters[i]])
         patch.set_alpha(0.7)
-    ax2.set_ylabel("Error Medio (m)", fontsize=10)
-    ax2.set_title("Comparación Box Plot con Notch (IC 95% de la mediana)", fontsize=12, fontweight="bold")
+    ax2.set_ylabel("Mean error (m)", fontsize=10)
+    ax2.set_title("Box-plot comparison with notch (95% CI of the median)", fontsize=12, fontweight="bold")
     ax2.grid(True, alpha=0.3, axis="y")
 
-    # Panel 3: Barras agrupadas por hiperparámetro (top 4 más sensibles)
+    # Panel 3: bars grouped by hyperparameter (4 most sensitive)
     ax3 = fig.add_subplot(gs[1, :])
-    # Seleccionar los 4 hiperparámetros con mayor diferencia entre filtros
+    # Select the 4 hyperparameters with the largest difference between filters
     param_diffs = {}
     for param in numeric_params:
         total_diff = 0
@@ -838,7 +838,7 @@ def analyze_filter_differences(results: list[dict], output_dir: Path):
         param_diffs[param] = total_diff
     top_params = sorted(param_diffs.keys(), key=lambda p: param_diffs[p], reverse=True)[:4]
 
-    # Construir barras agrupadas
+    # Build the grouped bars
     all_labels = []
     all_positions = []
     group_centers = []
@@ -861,16 +861,16 @@ def analyze_filter_differences(results: list[dict], output_dir: Path):
             all_positions.append(pos)
             pos += 1
         group_centers.append((group_start + pos - 1) / 2)
-        pos += 0.8  # Espacio entre grupos
+        pos += 0.8  # Space between groups
 
     ax3.set_xticks(all_positions)
     ax3.set_xticklabels(all_labels, fontsize=8, rotation=45, ha="right")
-    ax3.set_ylabel("Error Medio (m)", fontsize=10)
-    ax3.set_title("Comparación por Filtro en los Hiperparámetros más Sensibles", fontsize=12, fontweight="bold")
+    ax3.set_ylabel("Mean error (m)", fontsize=10)
+    ax3.set_title("Per-filter comparison on the most sensitive hyperparameters", fontsize=12, fontweight="bold")
     ax3.grid(True, alpha=0.3, axis="y")
     ax3.legend(fontsize=10, loc="upper right")
 
-    # Etiquetas de grupo (nombre del hiperparámetro)
+    # Group labels (hyperparameter name)
     y_min = ax3.get_ylim()[0]
     for center, param in zip(group_centers, top_params):
         ax3.annotate(
@@ -882,19 +882,19 @@ def analyze_filter_differences(results: list[dict], output_dir: Path):
             color="#333333"
         )
 
-    # Panel 4: Tabla de métricas resumen
+    # Panel 4: summary metrics table
     ax4 = fig.add_subplot(gs[2, 0])
     ax4.axis("off")
-    table_headers = ["Métrica"] + [f.upper() for f in filters] + ["Δ"]
+    table_headers = ["Metric"] + [f.upper() for f in filters] + ["Δ"]
     table_data = []
     metrics_table = [
-        ("Error medio (m)", "mean"),
-        ("Mediana (m)", "median"),
-        ("Desv. estándar (m)", "std"),
-        ("Error mín. (m)", "min"),
-        ("Error máx. (m)", "max"),
+        ("Mean error (m)", "mean"),
+        ("Median (m)", "median"),
+        ("Std. deviation (m)", "std"),
+        ("Min. error (m)", "min"),
+        ("Max. error (m)", "max"),
         ("IQR (m)", None),
-        ("Error/punto (m)", "mean_per_point"),
+        ("Error/point (m)", "mean_per_point"),
     ]
     for label, key in metrics_table:
         row = [label]
@@ -924,15 +924,15 @@ def analyze_filter_differences(results: list[dict], output_dir: Path):
         bg = "#E8EEF4" if i % 2 == 0 else "white"
         for j in range(len(table_headers)):
             tbl[i + 1, j].set_facecolor(bg)
-        # Colorear la columna Δ según el signo
+        # Colour the Δ column according to its sign
         diff_val = float(table_data[i][-1])
         if diff_val < -1e-7:
             tbl[i + 1, len(table_headers) - 1].set_facecolor("#C6EFCE")
         elif diff_val > 1e-7:
             tbl[i + 1, len(table_headers) - 1].set_facecolor("#FFC7CE")
-    ax4.set_title("Resumen de Métricas por Filtro", fontsize=12, fontweight="bold", pad=15)
+    ax4.set_title("Summary of metrics per filter", fontsize=12, fontweight="bold", pad=15)
 
-    # Panel 5: Histogramas superpuestos
+    # Panel 5: overlaid histograms
     ax5 = fig.add_subplot(gs[2, 1])
     for f in filters:
         ax5.hist(
@@ -947,53 +947,53 @@ def analyze_filter_differences(results: list[dict], output_dir: Path):
             linestyle="--", linewidth=2, alpha=0.9,
             label=f"μ {f.upper()} = {filter_data[f]['mean']:.5f}"
         )
-    ax5.set_xlabel("Error Medio (m)", fontsize=10)
-    ax5.set_ylabel("Frecuencia", fontsize=10)
-    ax5.set_title("Distribuciones Superpuestas por Filtro", fontsize=12, fontweight="bold")
+    ax5.set_xlabel("Mean error (m)", fontsize=10)
+    ax5.set_ylabel("Frequency", fontsize=10)
+    ax5.set_title("Overlaid distributions per filter", fontsize=12, fontweight="bold")
     ax5.legend(fontsize=8)
     ax5.grid(True, alpha=0.3, axis="y")
 
     fig.suptitle(
-        "Análisis Detallado: Diferencias entre Filtros de Fusión",
+        "Detailed analysis: differences between fusion filters",
         fontsize=16, fontweight="bold", y=1.01
     )
     plt.tight_layout()
     fig.savefig(output_dir / "filter_fusion_differences.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ Análisis de diferencias por filtro: {output_dir / 'filter_fusion_differences.png'}")
+    print(f"  ✓ Filter difference analysis: {output_dir / 'filter_fusion_differences.png'}")
 
 
 # ─────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Determinar archivo CSV
+    # Determine the CSV file
     if len(sys.argv) > 1:
         csv_path = Path(sys.argv[1])
     else:
         csv_path = DEFAULT_CSV
 
     if not csv_path.exists():
-        print(f"❌ Archivo no encontrado: {csv_path}")
-        print(f"   Uso: python {Path(__file__).name} [ruta/al/archivo.csv]")
+        print(f"❌ File not found: {csv_path}")
+        print(f"   Usage: python {Path(__file__).name} [path/to/file.csv]")
         sys.exit(1)
 
-    print(f"\n📂 Leyendo: {csv_path}")
+    print(f"\n📂 Reading: {csv_path}")
 
-    # 1. Leer datos
+    # 1. Read the data
     results = read_csv(csv_path)
-    print(f"   → {len(results)} combinaciones cargadas")
+    print(f"   → {len(results)} combinations loaded")
 
-    # 2. Crear directorio de salida
+    # 2. Create the output directory
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 3. Reportes en consola
+    # 3. Console reports
     print_summary(results)
     print_top_n(results, n=10)
     best = print_best_combination(results)
 
-    # 4. Generar visualizaciones
-    print("\n🎨 Generando visualizaciones...")
+    # 4. Generate visualizations
+    print("\n🎨 Generating visualizations...")
     plot_trend_lines(results, OUTPUT_DIR)
     plot_box_plots(results, OUTPUT_DIR)
     plot_pairwise_heatmaps(results, OUTPUT_DIR)
@@ -1002,8 +1002,8 @@ if __name__ == "__main__":
     sensitivity_analysis(results, OUTPUT_DIR)
     plot_summary_table(results, OUTPUT_DIR, n=15)
 
-    # 5. Análisis detallado de diferencias por filtro de fusión
-    print("\n🔬 Analizando diferencias entre filtros de fusión...")
+    # 5. Detailed analysis of the differences per fusion filter
+    print("\n🔬 Analysing the differences between fusion filters...")
     analyze_filter_differences(results, OUTPUT_DIR)
 
-    print(f"\n✅ Análisis completo. Resultados guardados en: {OUTPUT_DIR.resolve()}")
+    print(f"\n✅ Analysis complete. Results saved to: {OUTPUT_DIR.resolve()}")

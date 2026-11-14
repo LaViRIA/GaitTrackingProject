@@ -1,25 +1,25 @@
 """
-Red Neuronal: Clasificador de Pie Pivote (Pivot Classifier)
+Neural network: pivot-foot classifier (Pivot Classifier)
 ===========================================================
-Arquitectura:
-  - Red Feed-Forward Multicapa (MLP) con BatchNorm + Dropout + LeakyReLU.
-  - Modelo alternativo opcional: TCN 1D no causal de clasificación temporal (GaitTCNPivotNet).
-  - Entrada: Vector concat de lecturas instantáneas IMU (24 características: acel, giro de 4 sensores) + 4 medidas antropométricas.
-  - Salida: Probabilidad Sigmoide binaria (1.0 = Pie Derecho en apoyo, 0.0 = Pie Izquierdo en apoyo).
-  - Función de pérdida: Binary Cross Entropy con regularización L2.
+Architecture:
+  - Multi-layer feed-forward network (MLP) with BatchNorm + Dropout + LeakyReLU.
+  - Optional alternative model: non-causal 1D TCN for temporal classification (GaitTCNPivotNet).
+  - Input: concatenated vector of instantaneous IMU readings (24 features: accel, gyro of 4 sensors) + 4 anthropometric measurements.
+  - Output: binary sigmoid probability (1.0 = right foot in stance, 0.0 = left foot in stance).
+  - Loss function: Binary Cross Entropy with L2 regularization.
 
-Propósito:
-  - Determinar con alta precisión el pie de apoyo (stance/pivote) en cada instante de tiempo para permitir
-    la acumulación de zancadas y reconstrucción del desplazamiento global sin sensores ópticos.
+Purpose:
+  - Determine the stance (pivot) foot with high accuracy at every time instant, to allow
+    accumulating strides and reconstructing the global displacement without optical sensors.
 
-Directorio de salida: nn-results/pivot_classifier/
+Output directory: nn-results/pivot_classifier/
 Checkpoints: nn-results/pivot_classifier/checkpoints/best_pivot_classifier.pt
 
-Uso:
-    python -m models.nn_pivot_classifier                         # Entrenamiento + evaluación
-    python -m models.nn_pivot_classifier --eval-only             # Solo evaluación
+Usage:
+    python -m models.nn_pivot_classifier                         # Training + evaluation
+    python -m models.nn_pivot_classifier --eval-only             # Evaluation only
 
-Autor: GaitTracking Project
+Author: GaitTracking Project
 """
 
 import sys
@@ -47,7 +47,7 @@ from sklearn.metrics import (
     roc_curve,
 )
 
-# Importar utilidades existentes de carga de datos
+# Import the existing data-loading utilities
 from process_all import (
     read_mcd_file,
     read_aruco_file,
@@ -56,18 +56,10 @@ from process_all import (
 )
 
 # ═══════════════════════════════════════════════════════════════════════
-#  CONFIGURACIÓN Y CONSTANTES
+#  CONFIGURATION AND CONSTANTS
 # ═══════════════════════════════════════════════════════════════════════
 
-DATASET_PATH = (
-    Path("/home/badajoz/Documents/DataSet")
-    if Path("/home/badajoz/Documents/DataSet").exists()
-    else (
-        Path("/home/moybadajoz/Documents/DataSet")
-        if Path("/home/moybadajoz/Documents/DataSet").exists()
-        else Path("../DataSet")
-    )
-)
+DATASET_PATH = Path("DataSet")  # default: DataSet/ in the repository root (override with --dataset)
 DATA_SPLIT_PATH = (
     Path(__file__).resolve().parent / "data_split.json"
     if (Path(__file__).resolve().parent / "data_split.json").exists()
@@ -79,11 +71,11 @@ CHECKPOINT_NAME = "best_pivot_classifier.pt"
 CHECKPOINT_PATH = CHECKPOINT_DIR / CHECKPOINT_NAME
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ── Filtrado y Parámetros de Datos ────────────────────────────────────
-CUTOFF_FREQ = 7  # Hz, filtro pasa-bajas del MCD
-FILTER_ORDER = 6  # Orden del filtro Butterworth
+# ── Filtering and data parameters ─────────────────────────────────────
+CUTOFF_FREQ = 7  # Hz, low-pass filter of the MCD
+FILTER_ORDER = 6  # Butterworth filter order
 
-# ── Entrenamiento ────────────────────────────────────────────────────
+# ── Training ─────────────────────────────────────────────────────────
 BATCH_SIZE = 1024
 LEARNING_RATE = 5e-3
 WEIGHT_DECAY = 1e-4
@@ -92,25 +84,25 @@ PATIENCE = 25
 GRAD_CLIP = 1.0
 BONE_NORM = 0.45
 
-# ── Canales y Dimensiones ─────────────────────────────────────────────
+# ── Channels and dimensions ───────────────────────────────────────────
 IMU_NAMES = ["RF", "LF", "RT", "LT"]
-SENSOR_CHANNELS = len(IMU_NAMES) * 6  # 24 canales (Acc X,Y,Z + Gyro X,Y,Z para 4 IMUs)
+SENSOR_CHANNELS = len(IMU_NAMES) * 6  # 24 channels (Acc X,Y,Z + Gyro X,Y,Z for 4 IMUs)
 ANTHROPOMETRIC_DIM = 4  # Femur, Tibia, Hip Width, Direction
 INPUT_DIM = SENSOR_CHANNELS + ANTHROPOMETRIC_DIM  # 28
-OUTPUT_DIM = 1  # Logit binario (1.0 = Pie Derecho, 0.0 = Pie Izquierdo)
+OUTPUT_DIM = 1  # Binary logit (1.0 = right foot, 0.0 = left foot)
 
-# ── Arquitectura MLP (Feed-Forward Estático) ───────────────────────────
+# ── MLP architecture (static feed-forward) ────────────────────────────
 HIDDEN_LAYERS = [16, 8, 8]
 DROPOUT_RATES = [0.15, 0.15, 0.15]
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  PREPARACIÓN DE DATOS Y EXTRACCIÓN DE GROUND TRUTH
+#  DATA PREPARATION AND GROUND-TRUTH EXTRACTION
 # ═══════════════════════════════════════════════════════════════════════
 
 
 def discover_captures(dataset_path: Path) -> list[tuple[str, str, str]]:
-    """Descubre los pares de archivos mcd-i.csv y arUcos-i.csv por sujeto."""
+    """Find the mcd-i.csv and arUcos-i.csv file pairs of each subject."""
     subjects = sorted(glob.glob("*", root_dir=str(dataset_path)))
     subjects = sorted([s for s in subjects if s.isdigit() and s != "0"], key=int)
     captures = []
@@ -125,11 +117,11 @@ def discover_captures(dataset_path: Path) -> list[tuple[str, str, str]]:
 
 def prepare_pivot_capture(mcd_path: str, aruco_path: str) -> dict | None:
     """
-    Procesa un par MCD/ArUco para generar datos de clasificación de pie pivote.
+    Process an MCD/ArUco pair to produce pivot-foot classification data.
     Ground Truth:
         score_r = z_ankle_r + 0.1 * v_ankle_r
         score_l = z_ankle_l + 0.1 * v_ankle_l
-        pivot_flag = 1.0 si score_r < score_l (Derecho) else 0.0 (Izquierdo)
+        pivot_flag = 1.0 if score_r < score_l (right) else 0.0 (left)
     """
     try:
         mcd_data = read_mcd_file(
@@ -138,7 +130,7 @@ def prepare_pivot_capture(mcd_path: str, aruco_path: str) -> dict | None:
         aruco_data = read_aruco_file(aruco_path)
         direction = mcd_data["measures"]["direction"]
 
-        # Ajustar ArUco al origen de la cadera
+        # Shift ArUco to the hip origin
         aruco_data = adjust_aruco_data(aruco_data, direction)
 
         aruco_processed = {
@@ -147,7 +139,7 @@ def prepare_pivot_capture(mcd_path: str, aruco_path: str) -> dict | None:
             "ankle_l": aruco_data["L_ankle_position"],
         }
 
-        # Filtrar ruido en Y
+        # Filter the noise in Y
         t_aruco = aruco_processed["hip"]["time"]
         if len(t_aruco) > 1:
             fs_aruco = 1000.0 / max(np.mean(np.diff(t_aruco)), 1.0)
@@ -168,7 +160,7 @@ def prepare_pivot_capture(mcd_path: str, aruco_path: str) -> dict | None:
             sensor_data[:, idx * 6 : idx * 6 + 3] = mcd_data[f"acceleration_{imu}"]
             sensor_data[:, idx * 6 + 3 : idx * 6 + 6] = mcd_data[f"gyro_{imu}"]
 
-        # Interpolar ArUco al tiempo MCD
+        # Interpolate ArUco to the MCD time base
         aruco_raw_keys = ["hip", "ankle_r", "ankle_l"]
         t_min_all = -np.inf
         t_max_all = np.inf
@@ -194,7 +186,7 @@ def prepare_pivot_capture(mcd_path: str, aruco_path: str) -> dict | None:
                 [joint_interp[i](valid_mcd_time) for i in range(3)]
             )
 
-        # Extracción de Ground Truth para pivote (Z y velocidad)
+        # Ground-truth extraction for the pivot (Z and velocity)
         z_r = joints_at_mcd["ankle_r"][:, 2]
         z_l = joints_at_mcd["ankle_l"][:, 2]
 
@@ -212,10 +204,10 @@ def prepare_pivot_capture(mcd_path: str, aruco_path: str) -> dict | None:
         score_r = z_r + weight_v * v_r
         score_l = z_l + weight_v * v_l
 
-        # 1.0 si el pie derecho es pivote, 0.0 si es el izquierdo
+        # 1.0 if the right foot is the pivot, 0.0 if it is the left one
         pivot_is_right = (score_r < score_l).astype(np.float32)
 
-        # Antropometría
+        # Anthropometry
         femur_length = float(mcd_data["measures"].get("femur_length", 0.4))
         tibia_length = float(mcd_data["measures"].get("tibia_length", 0.4))
         hip_width = float(mcd_data["measures"].get("hip_width", 0.25))
@@ -245,9 +237,9 @@ def prepare_pivot_capture(mcd_path: str, aruco_path: str) -> dict | None:
 
 class GaitPivotDataset(Dataset):
     """
-    Dataset estático para clasificación binaria de pie pivote.
-    Entrada: [sensores_normalizados (24), antropometria_normalizada (4)] -> 28 features
-    Etiqueta: [pivot_flag (1)] (1.0 = Derecho, 0.0 = Izquierdo)
+    Static dataset for binary pivot-foot classification.
+    Input: [normalized_sensors (24), normalized_anthropometry (4)] -> 28 features
+    Label: [pivot_flag (1)] (1.0 = right, 0.0 = left)
     """
 
     def __init__(
@@ -322,15 +314,15 @@ class GaitPivotDataset(Dataset):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  ARQUITECTURAS DEL MODELO
+#  MODEL ARCHITECTURES
 # ═══════════════════════════════════════════════════════════════════════
 
 
 class GaitStaticPivotNet(nn.Module):
     """
-    MLP Feed-Forward que predice instante a instante el pie pivote.
-    Entrada: 28 características (24 IMU + 4 antropometría).
-    Salida: Logit escalar (1 valor sin sigmoid, usado con BCEWithLogitsLoss).
+    Feed-forward MLP that predicts the pivot foot instant by instant.
+    Input: 28 features (24 IMU + 4 anthropometry).
+    Output: scalar logit (1 value without sigmoid, used with BCEWithLogitsLoss).
     """
 
     def __init__(
@@ -374,7 +366,7 @@ class GaitStaticPivotNet(nn.Module):
 
 class GaitTCNPivotNet(nn.Module):
     """
-    Modelo TCN temporal opcional para procesar secuencias si se requiere.
+    Optional temporal TCN model to process sequences if needed.
     """
 
     def __init__(self, input_dim=INPUT_DIM, hidden_dim=64):
@@ -406,13 +398,13 @@ class GaitTCNPivotNet(nn.Module):
 
 
 def print_model_summary(model: nn.Module):
-    """Imprime un resumen de la arquitectura del modelo neuronal y su tamaño en parámetros y KB/MB."""
+    """Print a summary of the neural model architecture and its size in parameters and KB/MB."""
     print()
     print("═" * 80)
-    print("  🧠 ARQUITECTURA DE LA RED CLASIFICADORA (GaitStaticPivotNet)")
+    print("  🧠 CLASSIFIER NETWORK ARCHITECTURE (GaitStaticPivotNet)")
     print("═" * 80)
     print(
-        f"  {'#':<4} │ {'Módulo / Capa':<28} │ {'Tipo de Capa':<20} │ {'Parámetros':>15}"
+        f"  {'#':<4} │ {'Module / Layer':<28} │ {'Layer type':<20} │ {'Parameters':>15}"
     )
     print("  " + "─" * 76)
 
@@ -438,16 +430,16 @@ def print_model_summary(model: nn.Module):
     param_mb = param_kb / 1024
 
     print("  " + "─" * 76)
-    print(f"  {'PARÁMETROS TOTALES ENTRENABLES':<56} │ {trainable_params:>15,}")
+    print(f"  {'TOTAL TRAINABLE PARAMETERS':<56} │ {trainable_params:>15,}")
     print(
-        f"  {'TAMAÑO APROXIMADO EN MEMORIA (Float32)':<56} │ {param_kb:>12.2f} KB ({param_mb:.4f} MB)"
+        f"  {'APPROXIMATE MEMORY SIZE (Float32)':<56} │ {param_kb:>12.2f} KB ({param_mb:.4f} MB)"
     )
     print("═" * 80)
     print()
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  ENTRENAMIENTO Y VALIDACIÓN
+#  TRAINING AND VALIDATION
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -481,7 +473,7 @@ def train_epoch(model, loader, optimizer, criterion, epoch, total_epochs):
             bar = "█" * filled + "░" * (bar_len - filled)
             acc = correct_preds / total_samples
             print(
-                f"\r  Época {epoch:3d}/{total_epochs} │{bar}│ Loss: {total_loss/total_samples:.4f} │ Acc: {acc*100:.2f}%",
+                f"\r  Epoch {epoch:3d}/{total_epochs} │{bar}│ Loss: {total_loss/total_samples:.4f} │ Acc: {acc*100:.2f}%",
                 end="",
                 flush=True,
             )
@@ -517,12 +509,12 @@ def validate(model, loader, criterion):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  EVALUACIÓN Y GRAFICACIÓN
+#  EVALUATION AND PLOTTING
 # ═══════════════════════════════════════════════════════════════════════
 
 
 def plot_training_curves(history: dict, save_dir: Path):
-    """Genera y guarda las curvas de pérdida y precisión del entrenamiento."""
+    """Plot and save the training loss and accuracy curves."""
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
     # Loss
@@ -530,8 +522,8 @@ def plot_training_curves(history: dict, save_dir: Path):
         history["train_loss"], label="Train Loss", color="#4472C4", linewidth=2
     )
     axes[0].plot(history["val_loss"], label="Val Loss", color="#ED7D31", linewidth=2)
-    axes[0].set_title("Pérdida Binaria (BCE Loss)", fontweight="bold")
-    axes[0].set_xlabel("Época")
+    axes[0].set_title("Binary loss (BCE loss)", fontweight="bold")
+    axes[0].set_xlabel("Epoch")
     axes[0].set_ylabel("Loss")
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
@@ -549,14 +541,14 @@ def plot_training_curves(history: dict, save_dir: Path):
         color="#FFC000",
         linewidth=2,
     )
-    axes[1].set_title("Precisión de Clasificación (%)", fontweight="bold")
-    axes[1].set_xlabel("Época")
+    axes[1].set_title("Classification accuracy (%)", fontweight="bold")
+    axes[1].set_xlabel("Epoch")
     axes[1].set_ylabel("Accuracy (%)")
     axes[1].legend()
     axes[1].grid(True, alpha=0.3)
 
     plt.suptitle(
-        "Curvas de Entrenamiento – Clasificador Neuronal de Pie Pivote",
+        "Training curves – pivot-foot neural classifier",
         fontsize=14,
         fontweight="bold",
     )
@@ -564,11 +556,11 @@ def plot_training_curves(history: dict, save_dir: Path):
     save_path = save_dir / "training_curves.png"
     fig.savefig(save_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
-    print(f"\n  ✓ Curvas de entrenamiento guardadas en: {save_path}")
+    print(f"\n  ✓ Training curves saved to: {save_path}")
 
 
 def evaluate_and_plot_metrics(model, test_captures, norm_stats, save_dir: Path):
-    """Evalúa la red en el test set y genera matriz de confusión, curva ROC y series temporales."""
+    """Evaluate the network on the test set and produce the confusion matrix, ROC curve and time series."""
     model.eval()
 
     all_targets = []
@@ -602,7 +594,7 @@ def evaluate_and_plot_metrics(model, test_captures, norm_stats, save_dir: Path):
         all_probs.append(probs)
 
     if len(all_targets) == 0:
-        print("  [ADVERTENCIA] No hay capturas de test para evaluar.")
+        print("  [WARNING] No test captures to evaluate.")
         return
 
     y_true = np.concatenate(all_targets)
@@ -616,34 +608,34 @@ def evaluate_and_plot_metrics(model, test_captures, norm_stats, save_dir: Path):
 
     print()
     print("═" * 80)
-    print("  📊 EVALUACIÓN EN TEST SET – CLASIFICADOR DE PIE PIVOTE")
+    print("  📊 TEST SET EVALUATION – PIVOT-FOOT CLASSIFIER")
     print("═" * 80)
-    print(f"  • Exactitud (Accuracy):  {acc * 100:.2f}%")
-    print(f"  • Precisión (Precision): {prec * 100:.2f}%")
-    print(f"  • Sensibilidad (Recall): {rec * 100:.2f}%")
+    print(f"  • Accuracy:              {acc * 100:.2f}%")
+    print(f"  • Precision:             {prec * 100:.2f}%")
+    print(f"  • Recall (sensitivity):  {rec * 100:.2f}%")
     print(f"  • F1-Score:             {f1 * 100:.2f}%")
-    print(f"  • Área ROC (ROC-AUC):    {auc:.4f}")
+    print(f"  • ROC area (ROC-AUC):    {auc:.4f}")
     print("  " + "─" * 50)
-    print("  Matriz de Confusión:")
+    print("  Confusion matrix:")
     print(f"    TN: {cm[0,0]:>7d} | FP: {cm[0,1]:>7d}")
     print(f"    FN: {cm[1,0]:>7d} | TP: {cm[1,1]:>7d}")
     print("═" * 80)
 
-    # ── Gráfica: Matriz de Confusión y Curva ROC ──────────────────────
+    # ── Plot: confusion matrix and ROC curve ──────────────────────────
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    # Matriz de Confusión Heatmap
+    # Confusion matrix heatmap
     im = axes[0].imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
-    axes[0].set_title("Matriz de Confusión", fontweight="bold")
+    axes[0].set_title("Confusion matrix", fontweight="bold")
     fig.colorbar(im, ax=axes[0])
     tick_marks = [0, 1]
-    classes = ["Izquierdo (0)", "Derecho (1)"]
+    classes = ["Left (0)", "Right (1)"]
     axes[0].set_xticks(tick_marks)
     axes[0].set_xticklabels(classes)
     axes[0].set_yticks(tick_marks)
     axes[0].set_yticklabels(classes)
     axes[0].set_ylabel("Ground Truth")
-    axes[0].set_xlabel("Predicción")
+    axes[0].set_xlabel("Prediction")
 
     for i in range(2):
         for j in range(2):
@@ -656,13 +648,13 @@ def evaluate_and_plot_metrics(model, test_captures, norm_stats, save_dir: Path):
                 fontweight="bold",
             )
 
-    # Curva ROC
+    # ROC curve
     fpr, tpr, _ = roc_curve(y_true, y_prob)
     axes[1].plot(fpr, tpr, color="#4472C4", linewidth=2, label=f"ROC (AUC = {auc:.4f})")
     axes[1].plot([0, 1], [0, 1], color="gray", linestyle="--")
-    axes[1].set_title("Curva ROC", fontweight="bold")
-    axes[1].set_xlabel("Tasa de Falsos Positivos (FPR)")
-    axes[1].set_ylabel("Tasa de Verdaderos Positivos (TPR)")
+    axes[1].set_title("ROC curve", fontweight="bold")
+    axes[1].set_xlabel("False positive rate (FPR)")
+    axes[1].set_ylabel("True positive rate (TPR)")
     axes[1].legend(loc="lower right")
     axes[1].grid(True, alpha=0.3)
 
@@ -670,9 +662,9 @@ def evaluate_and_plot_metrics(model, test_captures, norm_stats, save_dir: Path):
     metrics_path = save_dir / "evaluation_metrics.png"
     fig.savefig(metrics_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ Matriz de confusión y curva ROC guardadas en: {metrics_path}")
+    print(f"  ✓ Confusion matrix and ROC curve saved to: {metrics_path}")
 
-    # ── Gráfica: Timeline en la primera captura de Test ───────────────
+    # ── Plot: timeline of the first test capture ──────────────────────
     if len(test_captures) > 0:
         cap_sample = test_captures[0]
         tgt_sample = cap_sample["pivot_flag"]
@@ -692,7 +684,7 @@ def evaluate_and_plot_metrics(model, test_captures, norm_stats, save_dir: Path):
         ax.plot(
             frames,
             prob_sample,
-            label="Probabilidad Predicha (Right Foot)",
+            label="Predicted probability (right foot)",
             color="#1F77B4",
             linestyle="--",
             linewidth=1.5,
@@ -700,7 +692,7 @@ def evaluate_and_plot_metrics(model, test_captures, norm_stats, save_dir: Path):
         ax.step(
             frames,
             pred_sample,
-            label="Clasificación Binaria Predicha",
+            label="Predicted binary classification",
             color="#D62728",
             linestyle=":",
             linewidth=2,
@@ -708,13 +700,13 @@ def evaluate_and_plot_metrics(model, test_captures, norm_stats, save_dir: Path):
         )
 
         ax.set_title(
-            "Predicción de Pie Pivote vs Ground Truth (Serie Temporal)",
+            "Pivot-foot prediction vs ground truth (time series)",
             fontweight="bold",
         )
-        ax.set_xlabel("Frame (Instante)")
-        ax.set_ylabel("Estado de Apoyo (1 = Derecho, 0 = Izquierdo)")
+        ax.set_xlabel("Frame (instant)")
+        ax.set_ylabel("Stance state (1 = right, 0 = left)")
         ax.set_yticks([0, 0.5, 1])
-        ax.set_yticklabels(["Izquierdo", "Prob 0.5", "Derecho"])
+        ax.set_yticklabels(["Left", "Prob 0.5", "Right"])
         ax.legend(loc="upper right")
         ax.grid(True, alpha=0.3)
 
@@ -722,9 +714,9 @@ def evaluate_and_plot_metrics(model, test_captures, norm_stats, save_dir: Path):
         plt.tight_layout()
         fig.savefig(timeline_path, dpi=200, bbox_inches="tight")
         plt.close(fig)
-        print(f"  ✓ Ejemplo de serie temporal guardado en: {timeline_path}")
+        print(f"  ✓ Example time series saved to: {timeline_path}")
 
-    # Guardar métricas consolidadas
+    # Save the consolidated metrics
     final_metrics = {
         "accuracy": float(acc),
         "precision": float(prec),
@@ -735,61 +727,61 @@ def evaluate_and_plot_metrics(model, test_captures, norm_stats, save_dir: Path):
     }
     with open(save_dir / "final_metrics.json", "w") as f:
         json.dump(final_metrics, f, indent=2)
-    print(f"  ✅ Métricas finales guardadas en: {save_dir / 'final_metrics.json'}")
+    print(f"  ✅ Final metrics saved to: {save_dir / 'final_metrics.json'}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  PROGRAMA PRINCIPAL
+#  MAIN PROGRAM
 # ═══════════════════════════════════════════════════════════════════════
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Entrenamiento del Clasificador Neuronal de Pie Pivote"
+        description="Training of the pivot-foot neural classifier"
     )
     parser.add_argument(
-        "--epochs", type=int, default=EPOCHS, help="Número de épocas de entrenamiento"
+        "--epochs", type=int, default=EPOCHS, help="Number of training epochs"
     )
     parser.add_argument(
-        "--batch-size", type=int, default=BATCH_SIZE, help="Tamaño del batch"
+        "--batch-size", type=int, default=BATCH_SIZE, help="Batch size"
     )
     parser.add_argument(
-        "--lr", type=float, default=LEARNING_RATE, help="Learning rate inicial"
+        "--lr", type=float, default=LEARNING_RATE, help="Initial learning rate"
     )
     parser.add_argument(
-        "--patience", type=int, default=PATIENCE, help="Paciencia para early stopping"
+        "--patience", type=int, default=PATIENCE, help="Early-stopping patience"
     )
     parser.add_argument(
-        "--dataset", type=str, default=str(DATASET_PATH), help="Ruta al dataset"
+        "--dataset", type=str, default=str(DATASET_PATH), help="Path to the dataset"
     )
     parser.add_argument(
         "--n-val-subjects",
         type=int,
         default=3,
-        help="Número de sujetos para validación",
+        help="Number of validation subjects",
     )
     parser.add_argument(
-        "--n-test-subjects", type=int, default=5, help="Número de sujetos para test"
+        "--n-test-subjects", type=int, default=5, help="Number of test subjects"
     )
-    parser.add_argument("--seed", type=int, default=42, help="Semilla aleatoria")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
-        "--eval-only", action="store_true", help="Solo evaluación con modelo guardado"
+        "--eval-only", action="store_true", help="Evaluation only, with the saved model"
     )
     parser.add_argument(
         "--checkpoint-tag",
         type=str,
         default="",
-        help="Tag para identificar el checkpoint (default: '')",
+        help="Tag to identify the checkpoint (default: '')",
     )
     parser.add_argument(
         "--data-split",
         type=str,
         default=str(DATA_SPLIT_PATH),
-        help="Ruta al archivo JSON con la división de sujetos (default: data_split.json)",
+        help="Path to the JSON file with the subject split (default: data_split.json)",
     )
     args = parser.parse_args()
 
-    # Fijar semillas aleatorias
+    # Set the random seeds
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -797,12 +789,12 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
 
     print("═" * 80)
-    print("  🦶 CLASIFICADOR NEURONAL DE PIE PIVOTE (ESTÁTICO INSTANTE A INSTANTE)")
+    print("  🦶 PIVOT-FOOT NEURAL CLASSIFIER (STATIC, INSTANT BY INSTANT)")
     print("═" * 80)
     print(f"  Dataset:       {args.dataset}")
     print(f"  Data split:    {args.data_split}")
-    print(f"  Dispositivo:   {DEVICE}")
-    print(f"  Épocas:        {args.epochs}")
+    print(f"  Device:        {DEVICE}")
+    print(f"  Epochs:        {args.epochs}")
     print(f"  Batch size:    {args.batch_size}")
     print(f"  Learning Rate: {args.lr}")
     if args.checkpoint_tag:
@@ -813,14 +805,14 @@ def main():
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("\n  📂 Descubriendo capturas...")
+    print("\n  📂 Discovering captures...")
     captures_info = discover_captures(dataset_path)
 
     if len(captures_info) == 0:
-        print("  [ERROR] No se encontraron capturas válidas.")
+        print("  [ERROR] No valid captures found.")
         return
 
-    print("\n  ⚙️ Procesando capturas y generando Ground Truth ArUco...")
+    print("\n  ⚙️ Processing captures and generating the ArUco ground truth...")
     subjects_data = {}
     total_captures = len(captures_info)
     success_count = 0
@@ -841,14 +833,14 @@ def main():
         filled = int(bar_len * progress)
         bar = "█" * filled + "░" * (bar_len - filled)
         print(
-            f"\r  Cargando capturas │{bar}│ {idx}/{total_captures} ({progress*100:.1f}%) │ ✓ {success_count} │ ✗ {failed_count}",
+            f"\r  Loading captures │{bar}│ {idx}/{total_captures} ({progress*100:.1f}%) │ ✓ {success_count} │ ✗ {failed_count}",
             end="",
             flush=True,
         )
 
-    print(f"\n  ✓ Capturas procesadas exitosamente: {success_count}")
+    print(f"\n  ✓ Captures processed successfully: {success_count}")
 
-    # División por sujetos (evitar data leakage)
+    # Split by subject (avoids data leakage)
     split_path = Path(args.data_split) if getattr(args, "data_split", None) else None
     if split_path and not split_path.exists():
         alt_path = Path(__file__).resolve().parent / split_path
@@ -880,14 +872,14 @@ def main():
                 val_subjs = cand_val
                 test_subjs = cand_test
                 loaded_from_split = True
-                print(f"\n  📊 División del Dataset por Sujetos (desde {split_path}):")
+                print(f"\n  📊 Dataset split by subject (from {split_path}):")
             else:
                 print(
-                    f"\n  ⚠️ [WARN] El archivo {split_path} no contiene suficientes sujetos válidos. Se usará partición automática."
+                    f"\n  ⚠️ [WARN] The file {split_path} does not contain enough valid subjects. An automatic split will be used."
                 )
         except Exception as e:
             print(
-                f"\n  ⚠️ [WARN] Error al leer {split_path}: {e}. Se usará partición automática."
+                f"\n  ⚠️ [WARN] Error reading {split_path}: {e}. An automatic split will be used."
             )
 
     if not loaded_from_split:
@@ -900,9 +892,9 @@ def main():
         test_subjs = subjects[-n_test:]
         val_subjs = subjects[-(n_test + n_val) : -n_test]
         train_subjs = subjects[: -(n_test + n_val)]
-        print("\n  📊 División del Dataset por Sujetos:")
+        print("\n  📊 Dataset split by subject:")
 
-    # Guardar división utilizada
+    # Save the split used
     split_record = {
         "source": str(split_path) if loaded_from_split else "auto_generated",
         "train_subjects": [int(s) if s.isdigit() else s for s in train_subjs],
@@ -917,16 +909,16 @@ def main():
     test_caps = [c for s in test_subjs for c in subjects_data[s]]
 
     print(
-        f"    Train ({len(train_subjs)} sujetos): {train_subjs} -> {len(train_caps)} capturas"
+        f"    Train ({len(train_subjs)} subjects): {train_subjs} -> {len(train_caps)} captures"
     )
     print(
-        f"    Val   ({len(val_subjs)} sujetos): {val_subjs} -> {len(val_caps)} capturas"
+        f"    Val   ({len(val_subjs)} subjects): {val_subjs} -> {len(val_caps)} captures"
     )
     print(
-        f"    Test  ({len(test_subjs)} sujetos): {test_subjs} -> {len(test_caps)} capturas"
+        f"    Test  ({len(test_subjs)} subjects): {test_subjs} -> {len(test_caps)} captures"
     )
 
-    print("\n  📦 Preparando tensores (Dataset)...")
+    print("\n  📦 Preparing tensors (Dataset)...")
     train_dataset = GaitPivotDataset(train_caps)
     norm_stats = train_dataset.get_stats()
     val_dataset = GaitPivotDataset(val_caps, stats=norm_stats)
@@ -952,7 +944,7 @@ def main():
 
     model = GaitStaticPivotNet().to(DEVICE)
 
-    # Configuración real del entrenamiento, se guarda dentro del checkpoint .pt
+    # Actual training configuration, saved inside the .pt checkpoint
     train_config = {
         "batch_size": args.batch_size,
         "lr": args.lr,
@@ -978,9 +970,9 @@ def main():
 
     if args.eval_only:
         if not ckpt_path.exists():
-            print(f"  [ERROR] No se encontró checkpoint en {ckpt_path}")
+            print(f"  [ERROR] No checkpoint found at {ckpt_path}")
             return
-        print(f"\n  📥 Cargando GaitStaticPivotNet desde {ckpt_path}")
+        print(f"\n  📥 Loading GaitStaticPivotNet from {ckpt_path}")
         checkpoint = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
         if "norm_stats" in checkpoint:
@@ -1016,7 +1008,7 @@ def main():
             "lr": [],
         }
 
-        print("\n  🚀 Iniciando Entrenamiento...")
+        print("\n  🚀 Starting training...")
         t_start = time.time()
 
         for epoch in range(1, args.epochs + 1):
@@ -1052,12 +1044,12 @@ def main():
                     ckpt_path,
                 )
                 print(
-                    f"\r  Época {epoch:3d}/{args.epochs} │ Train L: {tr_loss:.4f} Acc: {tr_acc*100:.2f}% │ Val L: {val_loss:.4f} Acc: {val_acc*100:.2f}% ★ │ {elapsed:.1f}s"
+                    f"\r  Epoch {epoch:3d}/{args.epochs} │ Train L: {tr_loss:.4f} Acc: {tr_acc*100:.2f}% │ Val L: {val_loss:.4f} Acc: {val_acc*100:.2f}% ★ │ {elapsed:.1f}s"
                 )
             else:
                 patience_counter += 1
                 print(
-                    f"\r  Época {epoch:3d}/{args.epochs} │ Train L: {tr_loss:.4f} Acc: {tr_acc*100:.2f}% │ Val L: {val_loss:.4f} Acc: {val_acc*100:.2f}%   │ {elapsed:.1f}s",
+                    f"\r  Epoch {epoch:3d}/{args.epochs} │ Train L: {tr_loss:.4f} Acc: {tr_acc*100:.2f}% │ Val L: {val_loss:.4f} Acc: {val_acc*100:.2f}%   │ {elapsed:.1f}s",
                     end="",
                 )
                 if epoch % 10 == 0:
@@ -1065,29 +1057,29 @@ def main():
 
                 if patience_counter >= args.patience:
                     print(
-                        f"\n  ⏹ Early stopping en época {epoch} (Mejor época: {best_epoch})"
+                        f"\n  ⏹ Early stopping at epoch {epoch} (best epoch: {best_epoch})"
                     )
                     break
 
         total_time = time.time() - t_start
-        print(f"\n  ✅ Entrenamiento completado en {total_time / 60:.1f} min")
+        print(f"\n  ✅ Training completed in {total_time / 60:.1f} min")
         print(
-            f"  Mejor Validation Loss: {best_val_loss:.6f} (Acc: {history['val_acc'][best_epoch-1]*100:.2f}%) en Época {best_epoch}"
+            f"  Best validation loss: {best_val_loss:.6f} (Acc: {history['val_acc'][best_epoch-1]*100:.2f}%) at epoch {best_epoch}"
         )
 
-        # Guardar historial JSON
+        # Save the JSON history
         with open(RESULTS_DIR / "training_history.json", "w") as f:
             json.dump(history, f, indent=4)
 
         plot_training_curves(history, RESULTS_DIR)
 
-        # Cargar mejor checkpoint para evaluación
+        # Load the best checkpoint for evaluation
         if ckpt_path.exists():
             checkpoint = torch.load(ckpt_path, weights_only=False)
             model.load_state_dict(checkpoint["model_state_dict"])
 
-    # Evaluar el modelo en Test Set
-    print("\n  🔍 Evaluando checkpoint en Test Set...")
+    # Evaluate the model on the test set
+    print("\n  🔍 Evaluating the checkpoint on the test set...")
     evaluate_and_plot_metrics(model, test_caps, norm_stats, RESULTS_DIR)
 
 

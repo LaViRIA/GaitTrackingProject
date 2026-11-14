@@ -9,3 +9,6 @@ config
 .ipynb_checkpoints/
 .pytest_cache/
 /v2_manuscript
+/runs
+__pycache__/
+/DataSet

@@ -1,24 +1,24 @@
 """
-Red Neuronal: Reconstrucción Estática Relativa al Pivote (Static Pivot)
+Neural network: static reconstruction relative to the pivot (Static Pivot)
 ========================================================================
-Arquitectura:
-  - Red Neuronal Feed-Forward profunda (MLP) con bloques residuales densos (Linear + BatchNorm + LeakyReLU + Dropout).
-  - Entrada: Vector instantáneo (24 valores IMU: acelerómetros y giroscopios de 4 sensores) + 3 medidas antropométricas normalizadas.
-  - Salida: Tensor de pose 3D de 18 dimensiones (6 articulaciones x 3 coordenadas) referenciadas al pie pivote actual.
-  - Función de pérdida: MSE de pose + static_bone_length_loss (consistencia estricta de longitudes óseas).
+Architecture:
+  - Deep feed-forward neural network (MLP) with dense residual blocks (Linear + BatchNorm + LeakyReLU + Dropout).
+  - Input: instantaneous vector (24 IMU values: accelerometers and gyroscopes of 4 sensors) + 3 normalized anthropometric measurements.
+  - Output: 18-dimensional 3D pose tensor (6 joints x 3 coordinates) referenced to the current pivot foot.
+  - Loss function: pose MSE + static_bone_length_loss (strict bone-length consistency).
 
-Propósito:
-  - Realizar estimación de pose articular desacoplada del avance espacial, usando el pie pivote de apoyo como
-    anclaje del sistema de referencia local, permitiendo luego reconstrucción global acumulativa.
+Purpose:
+  - Estimate the joint pose decoupled from spatial progression, using the stance (pivot) foot as the
+    anchor of the local reference frame, which later allows a cumulative global reconstruction.
 
-Directorio de salida: nn-results/static_pivot/
+Output directory: nn-results/static_pivot/
 Checkpoints: nn-results/static_pivot/checkpoints/best_static_model.pt
 
-Uso:
-    python -m models.nn_static_pivot                         # Entrenamiento + evaluación
-    python -m models.nn_static_pivot --eval-only             # Solo evaluación
+Usage:
+    python -m models.nn_static_pivot                         # Training + evaluation
+    python -m models.nn_static_pivot --eval-only             # Evaluation only
 
-Autor: GaitTracking Project
+Author: GaitTracking Project
 """
 
 import sys
@@ -38,7 +38,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
-# Importar utilidades existentes de carga de datos
+# Import the existing data-loading utilities
 from process_all import (
     read_mcd_file,
     read_aruco_file,
@@ -48,18 +48,10 @@ from process_all import (
 )
 
 # ═══════════════════════════════════════════════════════════════════════
-#  CONFIGURACIÓN
+#  CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════
 
-DATASET_PATH = (
-    Path("/home/badajoz/Documents/DataSet")
-    if Path("/home/badajoz/Documents/DataSet").exists()
-    else (
-        Path("/home/moybadajoz/Documents/DataSet")
-        if Path("/home/moybadajoz/Documents/DataSet").exists()
-        else Path("../DataSet")
-    )
-)
+DATASET_PATH = Path("DataSet")  # default: DataSet/ in the repository root (override with --dataset)
 DATA_SPLIT_PATH = (
     Path(__file__).resolve().parent / "data_split.json"
     if (Path(__file__).resolve().parent / "data_split.json").exists()
@@ -71,19 +63,19 @@ CHECKPOINT_NAME = "best_static_model.pt"
 CHECKPOINT_PATH = CHECKPOINT_DIR / CHECKPOINT_NAME
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ── Datos ─────────────────────────────────────────────────────────────
-CUTOFF_FREQ = 7  # Hz, filtro pasa-bajas del MCD
-FILTER_ORDER = 6  # orden del filtro Butterworth
+# ── Data ──────────────────────────────────────────────────────────────
+CUTOFF_FREQ = 7  # Hz, low-pass filter of the MCD
+FILTER_ORDER = 6  # Butterworth filter order
 
-# ── Entrenamiento ────────────────────────────────────────────────────
-BATCH_SIZE = 1024  # Mayor tamaño de batch para optimizar uso de la GPU (antes 256)
+# ── Training ─────────────────────────────────────────────────────────
+BATCH_SIZE = 1024  # Larger batch size to make better use of the GPU (previously 256)
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-4
 EPOCHS = 150
 PATIENCE = 30
 GRAD_CLIP = 1.0
 
-# ── Articulaciones y Entrada/Salida ──────────────────────────────────
+# ── Joints and input/output ──────────────────────────────────────────
 JOINT_NAMES = ["hip_r", "hip_l", "knee_r", "knee_l", "ankle_r", "ankle_l"]
 N_JOINTS = 6
 N_COORDS = 3
@@ -92,16 +84,16 @@ OUTPUT_DIM = N_JOINTS * N_COORDS  # 18
 IMU_NAMES = ["RF", "LF", "RT", "LT"]
 SENSOR_CHANNELS = len(IMU_NAMES) * 6  # 24
 ANTHROPOMETRIC_DIM = 4  # femur, tibia, direction
-PIVOT_FLAG_DIM = 1  # 1 si pie derecho es pivote, 0 si es izquierdo
+PIVOT_FLAG_DIM = 1  # 1 if the right foot is the pivot, 0 if it is the left one
 INPUT_DIM = SENSOR_CHANNELS + ANTHROPOMETRIC_DIM + PIVOT_FLAG_DIM  # 28
 
-# ── Arquitectura del Modelo (MLP) ────────────────────────────────────
+# ── Model architecture (MLP) ─────────────────────────────────────────
 HIDDEN_LAYERS = [64, 64, 32]
 DROPOUT_RATES = [0.15, 0.15, 0.1]
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  PREPARACIÓN DE DATOS (SIN SECUENCIA, RELATIVO A CADERA)
+#  DATA PREPARATION (NO SEQUENCE, HIP-RELATIVE)
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -120,9 +112,9 @@ def discover_captures(dataset_path: Path) -> list[tuple[str, str, str]]:
 
 def prepare_static_capture(mcd_path: str, aruco_path: str) -> dict | None:
     """
-    Procesa un par MCD/ArUco para generar datos estáticos (frame a frame).
-    Elimina el factor de desplazamiento centrando todas las articulaciones
-    respecto a la cadera en cada instante.
+    Process an MCD/ArUco pair to produce static (frame-by-frame) data.
+    Removes the displacement by centring every joint
+    on the hip at each instant.
     """
     try:
         mcd_data = read_mcd_file(
@@ -131,7 +123,7 @@ def prepare_static_capture(mcd_path: str, aruco_path: str) -> dict | None:
         aruco_data = read_aruco_file(aruco_path)
         direction = mcd_data["measures"]["direction"]
 
-        # Ajustar ArUco al origen
+        # Shift ArUco to the origin
         aruco_data = adjust_aruco_data(aruco_data, direction)
 
         aruco_processed = {
@@ -142,7 +134,7 @@ def prepare_static_capture(mcd_path: str, aruco_path: str) -> dict | None:
             "ankle_l": aruco_data["L_ankle_position"],
         }
 
-        # Filtrar ruido Y
+        # Filter the Y noise
         t_aruco = aruco_processed["hip"]["time"]
         if len(t_aruco) > 1:
             fs_aruco = 1000.0 / max(np.mean(np.diff(t_aruco)), 1.0)
@@ -163,7 +155,7 @@ def prepare_static_capture(mcd_path: str, aruco_path: str) -> dict | None:
             sensor_data[:, idx * 6 : idx * 6 + 3] = mcd_data[f"acceleration_{imu}"]
             sensor_data[:, idx * 6 + 3 : idx * 6 + 6] = mcd_data[f"gyro_{imu}"]
 
-        # Interpolar ArUco
+        # Interpolate ArUco
         aruco_raw_keys = ["hip", "knee_r", "knee_l", "ankle_r", "ankle_l"]
         t_min_all = -np.inf
         t_max_all = np.inf
@@ -201,18 +193,18 @@ def prepare_static_capture(mcd_path: str, aruco_path: str) -> dict | None:
         half_hw_r = +half_hw * side_sign
         half_hw_l = -half_hw * side_sign
 
-        # Eliminar desplazamiento fijando Y=0
+        # Remove the displacement by fixing Y=0
         hip_at_mcd[:, 1] = 0.0
 
         gt_relative = np.zeros((N, N_JOINTS * N_COORDS))
 
-        # Posiciones relativas al pie pivote (considerando menor Z y menor velocidad)
+        # Positions relative to the pivot foot (taking the lowest Z and lowest velocity)
         z_r = joints_at_mcd["ankle_r"][:, 2]
         z_l = joints_at_mcd["ankle_l"][:, 2]
 
-        # Calcular velocidad aproximada de cada tobillo
+        # Compute the approximate velocity of each ankle
         dt = np.gradient(valid_mcd_time)
-        dt[dt == 0] = 1e-6  # Evitar división por cero
+        dt[dt == 0] = 1e-6  # Avoid division by zero
 
         v_r = np.linalg.norm(
             np.gradient(joints_at_mcd["ankle_r"], axis=0) / dt[:, np.newaxis], axis=1
@@ -221,8 +213,8 @@ def prepare_static_capture(mcd_path: str, aruco_path: str) -> dict | None:
             np.gradient(joints_at_mcd["ankle_l"], axis=0) / dt[:, np.newaxis], axis=1
         )
 
-        # Combinar altura (Z) y velocidad para determinar el pivote
-        # Z suele estar en rango [0, 0.2] m, V en [0, 2] m/s. Usamos un peso para equilibrar.
+        # Combine height (Z) and velocity to determine the pivot
+        # Z is usually in the range [0, 0.2] m, V in [0, 2] m/s. A weight balances them.
         weight_v = 0.1
         score_r = z_r + weight_v * v_r
         score_l = z_l + weight_v * v_l
@@ -318,7 +310,7 @@ def prepare_static_capture(mcd_path: str, aruco_path: str) -> dict | None:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  DATASET ESTÁTICO
+#  STATIC DATASET
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -347,13 +339,13 @@ class GaitStaticDataset(Dataset):
                 dtype=np.float32,
             )
 
-            # Duplicar antropometría para cada frame
+            # Repeat the anthropometry for each frame
             anthro_broadcast = np.tile(anthro, (len(sensor), 1))
 
-            # Pivot flag (1 si es derecho, 0 si es izquierdo)
+            # Pivot flag (1 if right, 0 if left)
             pivot_flag = cap["pivot_flag"].reshape(-1, 1)
 
-            # Concatenar features extras
+            # Concatenate the extra features
             extra_features = np.concatenate([anthro_broadcast, pivot_flag], axis=1)
 
             self.inputs.append((sensor, extra_features))
@@ -383,7 +375,7 @@ class GaitStaticDataset(Dataset):
 
         self.normalize = normalize
 
-        # --- OPTIMIZACIÓN: Pre-computar tensores ---
+        # --- OPTIMIZATION: pre-compute tensors ---
         if len(self.sensor_data) > 0:
             if self.normalize:
                 self.sensor_data = (self.sensor_data - self.mean) / self.std
@@ -408,14 +400,14 @@ class GaitStaticDataset(Dataset):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  MODELO FEED-FORWARD
+#  FEED-FORWARD MODEL
 # ═══════════════════════════════════════════════════════════════════════
 
 
 class GaitStaticNet(nn.Module):
     """
-    MLP que toma datos de un instante (sensores + antropometría) y
-    predice directamente la pose relativa de ese instante.
+    MLP that takes the data of one instant (sensors + anthropometry) and
+    directly predicts the relative pose at that instant.
     """
 
     def __init__(
@@ -502,17 +494,17 @@ def static_loss(pred_pose, target_pose, anthropometric, bone_weight=0.1):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  ENTRENAMIENTO
+#  TRAINING
 # ═══════════════════════════════════════════════════════════════════════
 
 
 def print_model_summary(model: nn.Module):
-    """Imprime un resumen de la arquitectura del modelo MLP."""
+    """Print a summary of the MLP model architecture."""
     print()
     print("═" * 80)
-    print("  🧠 ARQUITECTURA DE LA RED NEURONAL ESTÁTICA (GaitStaticNet)")
+    print("  🧠 STATIC NEURAL NETWORK ARCHITECTURE (GaitStaticNet)")
     print("═" * 80)
-    print(f"  {'Módulo / Bloque':<32} │ {'Tipo de Capa':<24} │ {'Parámetros':>15}")
+    print(f"  {'Module / Block':<32} │ {'Layer type':<24} │ {'Parameters':>15}")
     print("  " + "─" * 76)
 
     total_params = 0
@@ -527,13 +519,13 @@ def print_model_summary(model: nn.Module):
         print(f"  {name:<32} │ {layer_type:<24} │ {p_count:>15,}")
 
     print("  " + "─" * 76)
-    print(f"  {'PARÁMETROS TOTALES ENTRENABLES':<59} │ {trainable_params:>15,}")
+    print(f"  {'TOTAL TRAINABLE PARAMETERS':<59} │ {trainable_params:>15,}")
     print("═" * 80)
     print()
 
 
 def plot_training_curves(history: dict, save_dir: Path):
-    """Genera y guarda gráficas de la curva de pérdida de entrenamiento."""
+    """Plot and save the training loss curves."""
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
     # Loss total
@@ -542,7 +534,7 @@ def plot_training_curves(history: dict, save_dir: Path):
         history["val_loss"], label="Validation Loss", color="#ED7D31", alpha=0.8
     )
     axes[0].set_title("Total Loss (MSE + Bone)", fontweight="bold")
-    axes[0].set_xlabel("Época")
+    axes[0].set_xlabel("Epoch")
     axes[0].set_ylabel("Loss")
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
@@ -552,13 +544,13 @@ def plot_training_curves(history: dict, save_dir: Path):
     if "lr" in history and len(history["lr"]) > 0:
         axes[1].plot(history["lr"], color="#70AD47")
         axes[1].set_title("Learning Rate", fontweight="bold")
-        axes[1].set_xlabel("Época")
+        axes[1].set_xlabel("Epoch")
         axes[1].set_ylabel("LR")
         axes[1].grid(True, alpha=0.3)
         axes[1].set_yscale("log")
 
     plt.suptitle(
-        "Curvas de Entrenamiento – Red Neuronal Estática",
+        "Training curves – static neural network",
         fontsize=14,
         fontweight="bold",
     )
@@ -566,7 +558,7 @@ def plot_training_curves(history: dict, save_dir: Path):
     save_path = save_dir / "training_curves.png"
     fig.savefig(save_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
-    print(f"\n  ✓ Curvas de entrenamiento guardadas en: {save_path}")
+    print(f"\n  ✓ Training curves saved to: {save_path}")
 
 
 def train_epoch(model, loader, optimizer, epoch, total_epochs):
@@ -595,7 +587,7 @@ def train_epoch(model, loader, optimizer, epoch, total_epochs):
             filled = int(bar_len * progress)
             bar = "█" * filled + "░" * (bar_len - filled)
             print(
-                f"\r  Época {epoch:3d}/{total_epochs} │{bar}│ Batch {i+1}/{n_batches} │ Train Loss: {total_loss/(i+1):.4f}",
+                f"\r  Epoch {epoch:3d}/{total_epochs} │{bar}│ Batch {i+1}/{n_batches} │ Train Loss: {total_loss/(i+1):.4f}",
                 end="",
                 flush=True,
             )
@@ -625,7 +617,7 @@ def validate(model, loader):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  EVALUACIÓN Y COMPARACIÓN ANALÍTICA
+#  EVALUATION AND ANALYTICAL COMPARISON
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -690,7 +682,7 @@ def save_comparison_animation(
     save_path: str,
     max_frames: int = 400,
 ):
-    """Guarda una animación GIF comparando ArUco, Analítico y Red Neuronal."""
+    """Save a GIF animation comparing ArUco, analytical and neural network."""
     import matplotlib.animation as animation
 
     gt = gt_pose.reshape(-1, N_JOINTS, N_COORDS)
@@ -703,7 +695,7 @@ def save_comparison_animation(
     connections = [("pelvis", 0), ("pelvis", 1), (0, 2), (2, 4), (1, 3), (3, 5)]
 
     def get_skeleton_lines(pose_frame):
-        # Pelvis ya no es 0,0,0, es el punto medio entre hip_r y hip_l
+        # The pelvis is no longer 0,0,0; it is the midpoint between hip_r and hip_l
         pelvis = (pose_frame[0] + pose_frame[1]) / 2.0
         pts = np.vstack([pose_frame, pelvis])
         lines = []
@@ -715,12 +707,12 @@ def save_comparison_animation(
 
     def update(frame):
         ax.clear()
-        ax.set_title(f"Comparativa Estática - Frame {frame}")
+        ax.set_title(f"Static comparison - Frame {frame}")
         ax.set_xlabel("X (m)")
         ax.set_ylabel("Y (m)")
         ax.set_zlabel("Z (m)")
 
-        # Orientación isométrica
+        # Isometric view
         ax.view_init(elev=20, azim=-45)
 
         ax.set_xlim([-0.5, 0.5])
@@ -748,7 +740,7 @@ def save_comparison_animation(
                     color="#FF7F0E",
                     linewidth=2,
                     linestyle=":",
-                    label="Analítico" if line is lines_ana[0] else "",
+                    label="Analytical" if line is lines_ana[0] else "",
                 )
 
         lines_pred = get_skeleton_lines(pred[frame])
@@ -769,10 +761,10 @@ def save_comparison_animation(
 
     n_frames = min(max_frames, len(gt))
     ani = animation.FuncAnimation(fig, update, frames=n_frames, interval=50)
-    print(f"\n  🎥 Generando animación ({n_frames} frames)...")
+    print(f"\n  🎥 Generating animation ({n_frames} frames)...")
     ani.save(save_path, writer="pillow", fps=20)
     plt.close(fig)
-    print(f"  ✓ Animación guardada en: {save_path}")
+    print(f"  ✓ Animation saved to: {save_path}")
 
 
 @torch.no_grad()
@@ -786,7 +778,7 @@ def evaluate_static_model(
     all_ana_predictions = []
     all_ana_targets = []
 
-    print("\n  🔬 Evaluando en conjunto de Test y comparando con método analítico...")
+    print("\n  🔬 Evaluating on the test set and comparing with the analytical method...")
 
     for cap, (mcd_path, aruco_path) in zip(test_captures, test_file_paths):
         # Infer NN
@@ -814,7 +806,7 @@ def evaluate_static_model(
         all_predictions.append(pred_pose)
         all_targets.append(gt_pose)
 
-        # Pipeline Analítico
+        # Analytical pipeline
         try:
             ana_res = process_files((mcd_path, aruco_path), use_3d=False)
             if ana_res is not None:
@@ -844,7 +836,7 @@ def evaluate_static_model(
                         valid_j = rec[j_name][first_valid : first_valid + cap_len]
                         ana_rel[:, j_idx * 3 : (j_idx + 1) * 3] = valid_j - pivot
 
-                    # Evitar errores de longitud exactos si el filtro acortó demasiado analítico
+                    # Avoid exact-length errors if the filter shortened the analytical output too much
                     if len(ana_rel) == cap_len:
                         all_ana_predictions.append(ana_rel)
                         all_ana_targets.append(gt_pose)
@@ -875,9 +867,9 @@ def evaluate_static_model(
     print()
     print("═" * 80)
     title = (
-        "  📊 EVALUACIÓN COMPARATIVA – Test Set (NN vs Pipeline Analítico)"
+        "  📊 COMPARATIVE EVALUATION – Test Set (NN vs analytical pipeline)"
         if has_ana
-        else "  📊 EVALUACIÓN – Test Set"
+        else "  📊 EVALUATION – Test Set"
     )
     print(title)
     print("═" * 80)
@@ -886,10 +878,10 @@ def evaluate_static_model(
     print(f"  {'─' * 70}")
     if has_ana:
         print(
-            f"     {'Articulación':<14}  {'Red Neuronal (NN)':>20}  {'Pipeline Analítico':>20}  {'Ganador':>12}"
+            f"     {'Joint':<14}  {'Neural network (NN)':>20}  {'Analytical pipeline':>20}  {'Winner':>12}"
         )
         print(f"     {'─' * 14}  {'─' * 20}  {'─' * 20}  {'─' * 12}")
-        win_m = "✅ NN" if mpjpe["mean"] < mpjpe_ana["mean"] else "📐 Analítico"
+        win_m = "✅ NN" if mpjpe["mean"] < mpjpe_ana["mean"] else "📐 Analytical"
         print(
             f"     {'General':<14}  {mpjpe['mean']:>18.4f} m  {mpjpe_ana['mean']:>18.4f} m  {win_m:>12}"
         )
@@ -897,7 +889,7 @@ def evaluate_static_model(
             f"     {'General (P95)':<14}  {mpjpe_p95['mean']:>18.4f} m  {'--':>18}    {'--':>12}"
         )
         for name in JOINT_NAMES:
-            win_j = "✅ NN" if mpjpe[name] < mpjpe_ana[name] else "📐 Analítico"
+            win_j = "✅ NN" if mpjpe[name] < mpjpe_ana[name] else "📐 Analytical"
             print(
                 f"     {name:<14}  {mpjpe[name]:>18.4f} m  {mpjpe_ana[name]:>18.4f} m  {win_j:>12}"
             )
@@ -907,14 +899,14 @@ def evaluate_static_model(
         for name in JOINT_NAMES:
             print(f"     {name:<14}  {mpjpe[name]:.4f} m")
 
-    print(f"\n  2) MAE (Mean Absolute Error por articulación)")
+    print(f"\n  2) MAE (Mean Absolute Error per joint)")
     print(f"  {'─' * 70}")
     if has_ana:
         print(
-            f"     {'Articulación':<14}  {'Red Neuronal (NN)':>20}  {'Pipeline Analítico':>20}  {'Ganador':>12}"
+            f"     {'Joint':<14}  {'Neural network (NN)':>20}  {'Analytical pipeline':>20}  {'Winner':>12}"
         )
         print(f"     {'─' * 14}  {'─' * 20}  {'─' * 20}  {'─' * 12}")
-        win_mae = "✅ NN" if mae["mean"] < mae_ana["mean"] else "📐 Analítico"
+        win_mae = "✅ NN" if mae["mean"] < mae_ana["mean"] else "📐 Analytical"
         print(
             f"     {'General':<14}  {mae['mean']:>18.4f} m  {mae_ana['mean']:>18.4f} m  {win_mae:>12}"
         )
@@ -922,7 +914,7 @@ def evaluate_static_model(
             f"     {'General (P95)':<14}  {mae_p95['mean']:>18.4f} m  {'--':>18}    {'--':>12}"
         )
         for name in JOINT_NAMES:
-            win_j = "✅ NN" if mae[name] < mae_ana[name] else "📐 Analítico"
+            win_j = "✅ NN" if mae[name] < mae_ana[name] else "📐 Analytical"
             print(
                 f"     {name:<14}  {mae[name]:>18.4f} m  {mae_ana[name]:>18.4f} m  {win_j:>12}"
             )
@@ -932,14 +924,14 @@ def evaluate_static_model(
         for name in JOINT_NAMES:
             print(f"     {name:<14}  {mae[name]:.4f} m")
 
-    print(f"\n  3) RMSE por articulación")
+    print(f"\n  3) RMSE per joint")
     print(f"  {'─' * 70}")
     if has_ana:
         print(
-            f"     {'Articulación':<14}  {'Red Neuronal (NN)':>20}  {'Pipeline Analítico':>20}  {'Ganador':>12}"
+            f"     {'Joint':<14}  {'Neural network (NN)':>20}  {'Analytical pipeline':>20}  {'Winner':>12}"
         )
         print(f"     {'─' * 14}  {'─' * 20}  {'─' * 20}  {'─' * 12}")
-        win_rmse = "✅ NN" if rmse["mean"] < rmse_ana["mean"] else "📐 Analítico"
+        win_rmse = "✅ NN" if rmse["mean"] < rmse_ana["mean"] else "📐 Analytical"
         print(
             f"     {'General':<14}  {rmse['mean']:>18.4f} m  {rmse_ana['mean']:>18.4f} m  {win_rmse:>12}"
         )
@@ -947,7 +939,7 @@ def evaluate_static_model(
             f"     {'General (P95)':<14}  {rmse_p95['mean']:>18.4f} m  {'--':>18}    {'--':>12}"
         )
         for name in JOINT_NAMES:
-            win_j = "✅ NN" if rmse[name] < rmse_ana[name] else "📐 Analítico"
+            win_j = "✅ NN" if rmse[name] < rmse_ana[name] else "📐 Analytical"
             print(
                 f"     {name:<14}  {rmse[name]:>18.4f} m  {rmse_ana[name]:>18.4f} m  {win_j:>12}"
             )
@@ -962,14 +954,14 @@ def evaluate_static_model(
         imp_mae = ((mae_ana["mean"] - mae["mean"]) / mae_ana["mean"]) * 100
         imp_rmse = ((rmse_ana["mean"] - rmse["mean"]) / rmse_ana["mean"]) * 100
 
-        print("\n  🏆 Mejoras Relativas Globales (NN vs Analítico):")
+        print("\n  🏆 Global relative improvements (NN vs analytical):")
         print(f"     • MPJPE: {imp_mpjpe:+.2f}%")
         print(f"     • MAE:   {imp_mae:+.2f}%")
         print(f"     • RMSE:  {imp_rmse:+.2f}%")
 
     print("═" * 80)
 
-    # Guardar métricas consolidadas
+    # Save the consolidated metrics
     final_metrics = {
         "mpjpe": mpjpe,
         "mpjpe_p95": mpjpe_p95,
@@ -989,9 +981,9 @@ def evaluate_static_model(
         }
     with open(RESULTS_DIR / "final_metrics.json", "w") as f:
         json.dump(final_metrics, f, indent=2)
-    print(f"  ✅ Métricas finales guardadas en: {RESULTS_DIR / 'final_metrics.json'}")
+    print(f"  ✅ Final metrics saved to: {RESULTS_DIR / 'final_metrics.json'}")
 
-    # Generar animación para la captura más larga del Test Set
+    # Generate the animation for the longest capture of the test set
     if len(all_predictions) > 0:
         best_idx = int(np.argmax([len(t) for t in all_targets]))
         gt_sample = all_targets[best_idx]
@@ -1012,57 +1004,57 @@ def evaluate_static_model(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Reconstrucción de marcha estática con MLP"
+        description="Static gait reconstruction with an MLP"
     )
     parser.add_argument(
-        "--epochs", type=int, default=EPOCHS, help="Número de épocas de entrenamiento"
+        "--epochs", type=int, default=EPOCHS, help="Number of training epochs"
     )
     parser.add_argument(
-        "--batch-size", type=int, default=BATCH_SIZE, help="Tamaño del batch"
+        "--batch-size", type=int, default=BATCH_SIZE, help="Batch size"
     )
     parser.add_argument(
-        "--lr", type=float, default=LEARNING_RATE, help="Learning rate inicial"
+        "--lr", type=float, default=LEARNING_RATE, help="Initial learning rate"
     )
     parser.add_argument(
-        "--patience", type=int, default=PATIENCE, help="Paciencia para early stopping"
+        "--patience", type=int, default=PATIENCE, help="Early-stopping patience"
     )
     parser.add_argument(
-        "--dataset", type=str, default=str(DATASET_PATH), help="Ruta al dataset"
+        "--dataset", type=str, default=str(DATASET_PATH), help="Path to the dataset"
     )
     parser.add_argument(
         "--n-val-subjects",
         type=int,
         default=3,
-        help="Número de sujetos para validación",
+        help="Number of validation subjects",
     )
     parser.add_argument(
-        "--n-test-subjects", type=int, default=5, help="Número de sujetos para test"
+        "--n-test-subjects", type=int, default=5, help="Number of test subjects"
     )
-    parser.add_argument("--seed", type=int, default=42, help="Semilla aleatoria")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
-        "--eval-only", action="store_true", help="Solo evaluación con modelo guardado"
+        "--eval-only", action="store_true", help="Evaluation only, with the saved model"
     )
     parser.add_argument(
         "--checkpoint-tag",
         type=str,
         default="",
-        help="Tag para identificar el checkpoint (default: '')",
+        help="Tag to identify the checkpoint (default: '')",
     )
     parser.add_argument(
         "--anim-frames",
         type=int,
         default=400,
-        help="Número máximo de frames para la animación GIF (default: 400)",
+        help="Maximum number of frames for the GIF animation (default: 400)",
     )
     parser.add_argument(
         "--data-split",
         type=str,
         default=str(DATA_SPLIT_PATH),
-        help="Ruta al archivo JSON con la división de sujetos (default: data_split.json)",
+        help="Path to the JSON file with the subject split (default: data_split.json)",
     )
     args = parser.parse_args()
 
-    # Fijar semillas
+    # Set the seeds
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -1070,7 +1062,7 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
 
     print("═" * 80)
-    print("  🏃 RECONSTRUCCIÓN ESTÁTICA (SIN SECUENCIA)")
+    print("  🏃 STATIC RECONSTRUCTION (NO SEQUENCE)")
     print("═" * 80)
     print(f"  Dataset:       {args.dataset}")
     print(f"  Data split:    {args.data_split}")
@@ -1086,14 +1078,14 @@ def main():
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("\n  📂 Descubriendo capturas...")
+    print("\n  📂 Discovering captures...")
     captures_info = discover_captures(dataset_path)
 
     if len(captures_info) == 0:
-        print("  [ERROR] No se encontraron archivos")
+        print("  [ERROR] No files found")
         return
 
-    print("\n  ⚙️ Cargando capturas estáticas...")
+    print("\n  ⚙️ Loading static captures...")
     subjects_data = {}
     file_paths_by_subject = {}
 
@@ -1118,12 +1110,12 @@ def main():
         filled = int(bar_len * progress)
         bar = "█" * filled + "░" * (bar_len - filled)
         print(
-            f"\r  Cargando capturas │{bar}│ {idx}/{total_captures} ({progress*100:.1f}%) │ ✓ {success_count} │ ✗ {failed_count}",
+            f"\r  Loading captures │{bar}│ {idx}/{total_captures} ({progress*100:.1f}%) │ ✓ {success_count} │ ✗ {failed_count}",
             end="",
             flush=True,
         )
 
-    print(f"\n  ✓ Capturas cargadas exitosamente: {success_count}")
+    print(f"\n  ✓ Captures loaded successfully: {success_count}")
 
     split_path = Path(args.data_split) if getattr(args, "data_split", None) else None
     if split_path and not split_path.exists():
@@ -1156,14 +1148,14 @@ def main():
                 val_subjs = cand_val
                 test_subjs = cand_test
                 loaded_from_split = True
-                print(f"\n  📊 División del Dataset por Sujetos (desde {split_path}):")
+                print(f"\n  📊 Dataset split by subject (from {split_path}):")
             else:
                 print(
-                    f"\n  ⚠️ [WARN] El archivo {split_path} no contiene suficientes sujetos válidos. Se usará partición automática."
+                    f"\n  ⚠️ [WARN] The file {split_path} does not contain enough valid subjects. An automatic split will be used."
                 )
         except Exception as e:
             print(
-                f"\n  ⚠️ [WARN] Error al leer {split_path}: {e}. Se usará partición automática."
+                f"\n  ⚠️ [WARN] Error reading {split_path}: {e}. An automatic split will be used."
             )
 
     if not loaded_from_split:
@@ -1176,9 +1168,9 @@ def main():
         test_subjs = subjects[-n_test:]
         val_subjs = subjects[-(n_test + n_val) : -n_test]
         train_subjs = subjects[: -(n_test + n_val)]
-        print("\n  📊 División del Dataset:")
+        print("\n  📊 Dataset split:")
 
-    # Guardar división utilizada
+    # Save the split used
     split_record = {
         "source": str(split_path) if loaded_from_split else "auto_generated",
         "train_subjects": [int(s) if s.isdigit() else s for s in train_subjs],
@@ -1199,19 +1191,19 @@ def main():
             test_file_paths.append(fpath)
 
     print(
-        f"    Train ({len(train_subjs)} sujetos): {train_subjs} -> {len(train_caps)} capturas"
+        f"    Train ({len(train_subjs)} subjects): {train_subjs} -> {len(train_caps)} captures"
     )
     print(
-        f"    Val   ({len(val_subjs)} sujetos): {val_subjs} -> {len(val_caps)} capturas"
+        f"    Val   ({len(val_subjs)} subjects): {val_subjs} -> {len(val_caps)} captures"
     )
-    print(f"    Test  ({len(test_subjs)} sujetos): {test_subjs}")
+    print(f"    Test  ({len(test_subjs)} subjects): {test_subjs}")
 
-    print("\n  📦 Preparando tensores (Dataset)...")
+    print("\n  📦 Preparing tensors (Dataset)...")
     train_dataset = GaitStaticDataset(train_caps)
     norm_stats = train_dataset.get_stats()
     val_dataset = GaitStaticDataset(val_caps, stats=norm_stats)
 
-    # Configurar DataLoader con multi-threading y pin_memory
+    # Configure the DataLoader with multi-threading and pin_memory
     num_workers = 4 if torch.cuda.is_available() else 0
     train_loader = DataLoader(
         train_dataset,
@@ -1233,7 +1225,7 @@ def main():
 
     model = GaitStaticNet().to(DEVICE)
 
-    # Configuración real del entrenamiento, se guarda dentro del checkpoint .pt
+    # Actual training configuration, saved inside the .pt checkpoint
     train_config = {
         "batch_size": args.batch_size,
         "lr": args.lr,
@@ -1259,15 +1251,15 @@ def main():
 
     if args.eval_only:
         if not ckpt_path.exists():
-            print(f"  [ERROR] No se encontró checkpoint en {ckpt_path}")
+            print(f"  [ERROR] No checkpoint found at {ckpt_path}")
             return
-        print(f"\n  📥 Cargando GaitStaticNet desde {ckpt_path}")
+        print(f"\n  📥 Loading GaitStaticNet from {ckpt_path}")
         checkpoint = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
         if "norm_stats" in checkpoint:
             norm_stats = checkpoint["norm_stats"]
     else:
-        # Activar kernel fusionado si está disponible (PyTorch 2.0+)
+        # Enable the fused kernel if available (PyTorch 2.0+)
         fused_opt = torch.cuda.is_available()
         try:
             optimizer = torch.optim.AdamW(
@@ -1277,7 +1269,7 @@ def main():
                 fused=fused_opt,
             )
         except TypeError:
-            # Fallback si PyTorch es antiguo y no soporta 'fused'
+            # Fallback if PyTorch is old and does not support 'fused'
             optimizer = torch.optim.AdamW(
                 model.parameters(), lr=args.lr, weight_decay=WEIGHT_DECAY
             )
@@ -1291,7 +1283,7 @@ def main():
 
         history = {"train_loss": [], "val_loss": [], "lr": []}
 
-        print("\n  🚀 Iniciando Entrenamiento...")
+        print("\n  🚀 Starting training...")
         t_start = time.time()
         for epoch in range(1, args.epochs + 1):
             t_epoch = time.time()
@@ -1321,44 +1313,44 @@ def main():
                     ckpt_path,
                 )
                 print(
-                    f"\r  Época {epoch:3d}/{args.epochs} │ Train: {tr_loss:.4f} │ Val: {val_loss:.4f} ★ │ LR: {current_lr:.1e} │ {elapsed:.1f}s"
+                    f"\r  Epoch {epoch:3d}/{args.epochs} │ Train: {tr_loss:.4f} │ Val: {val_loss:.4f} ★ │ LR: {current_lr:.1e} │ {elapsed:.1f}s"
                 )
             else:
                 patience_counter += 1
                 print(
-                    f"\r  Época {epoch:3d}/{args.epochs} │ Train: {tr_loss:.4f} │ Val: {val_loss:.4f}   │ LR: {current_lr:.1e} │ {elapsed:.1f}s",
+                    f"\r  Epoch {epoch:3d}/{args.epochs} │ Train: {tr_loss:.4f} │ Val: {val_loss:.4f}   │ LR: {current_lr:.1e} │ {elapsed:.1f}s",
                     end="",
                 )
                 if epoch % 10 == 0:
                     print("", flush=True)
-                # Warm Restart (Calentamiento del LR) a la mitad de la paciencia
+                # Warm restart (LR warm-up) at half the patience
                 if patience_counter == args.patience // 2:
                     for param_group in optimizer.param_groups:
                         param_group["lr"] = args.lr
-                    scheduler._reset()  # Reiniciar el contador del ReduceLROnPlateau
+                    scheduler._reset()  # Reset the ReduceLROnPlateau counter
 
                 if patience_counter >= args.patience:
                     print(
-                        f"\n  ⏹ Early stopping en época {epoch} (Mejor época: {best_epoch})"
+                        f"\n  ⏹ Early stopping at epoch {epoch} (best epoch: {best_epoch})"
                     )
                     break
 
         total_time = time.time() - t_start
-        print(f"\n  ✅ Entrenamiento completado en {total_time / 60:.1f} min")
-        print(f"  Mejor Validation Loss: {best_val_loss:.6f} en Época {best_epoch}")
+        print(f"\n  ✅ Training completed in {total_time / 60:.1f} min")
+        print(f"  Best validation loss: {best_val_loss:.6f} at epoch {best_epoch}")
 
-        # Guardar historial y graficar
+        # Save the history and plot
         with open(RESULTS_DIR / "training_history.json", "w") as f:
             json.dump(history, f, indent=4)
 
         plot_training_curves(history, RESULTS_DIR)
 
-        # Cargar el mejor modelo guardado para evaluación
+        # Load the best saved model for evaluation
         if ckpt_path.exists():
             checkpoint = torch.load(ckpt_path, weights_only=False)
             model.load_state_dict(checkpoint["model_state_dict"])
 
-    # Evaluar el mejor modelo en Test Set
+    # Evaluate the best model on the test set
     evaluate_static_model(
         model, test_caps, test_file_paths, norm_stats, anim_frames=args.anim_frames
     )
