@@ -1,0 +1,113 @@
+════════════════════════════════════════════════════════════════════════════════
+  🏃 RECONSTRUCTION AND COMPARISON WITH 3D GLOBAL DISPLACEMENT
+  (PivotNet + PoseNet + step accumulation vs analytical vs real ArUco)
+════════════════════════════════════════════════════════════════════════════════
+
+  📦 Loading the trained neural networks...
+  ✓ Loading PivotNet with hidden layers: [16, 8, 8]
+  ✓ Loading PoseNet with hidden layers: [64, 64, 32]
+  ✓ Loading TCN Lite from best_tcn_lite.pt with channels=[8, 16, 32, 32], kernels=[7, 7, 5, 5]
+  ✓ Loading TTL Lite with TCN=[16, 16, 32], LSTM_H=32, LSTM_L=1, Attn_L=2
+  ✓ Loading Transformer with CNN=[4, 8, 16], LSTM_H=12, LSTM_L=3, Attn_L=3
+  ✓ TCN Lite: inference window = 25
+  ✓ TTL Lite: inference window = 25
+  ✓ Transformer: inference window = 25
+
+  📂 Discovering captures and preparing the test set...
+    Test subjects (from data_split.json): ['24', '18', '14', '21', '15']
+    Test subjects (5): ['24', '18', '14', '21', '15']
+
+  ⚙️ Running the analytical method in parallel (20 captures)...
+
+  🔬 Running inference with displacement accumulation...
+
+  Frames evaluated: P+P/Oracle=7231, TCN=7124, TTL=7124, Trans=7124, Ana=7231
+
+  📐 METRICS IN RELATIVE SPACE (pelvis at [0, 0, 0]) (95th percentile)
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+     Joint               Static(P+P)  Oracle(GT Piv)         TCN Lite         TTL Lite      Transformer    Analytical      Winner
+     ──────────────  ───────────────  ───────────────  ───────────────  ───────────────  ───────────────  ────────────  ──────────
+     hip_r                  0.0076 m         0.0078 m        0.0142 m         0.0152 m         0.0078 m      0.0219 m      Static
+     hip_l                  0.0076 m         0.0078 m        0.0142 m         0.0152 m         0.0077 m      0.0219 m      Static
+     knee_r                 0.0421 m         0.0420 m        0.0398 m         0.0530 m         0.0586 m      0.0623 m         TCN
+     knee_l                 0.0399 m         0.0400 m        0.0395 m         0.0501 m         0.0552 m      0.0699 m         TCN
+     ankle_r                0.0532 m         0.0534 m        0.0526 m         0.0630 m         0.0771 m      0.0835 m         TCN
+     ankle_l                0.0526 m         0.0528 m        0.0542 m         0.0650 m         0.0762 m      0.0925 m      Static
+     ──────────────  ───────────────  ───────────────  ───────────────  ───────────────  ───────────────  ────────────  ──────────
+     GENERAL                0.0338 m         0.0340 m         0.0357 m         0.0436 m         0.0471 m      0.0587 m      Static
+
+  🏆 RELATIVE IMPROVEMENTS VS ANALYTICAL — RELATIVE SPACE:
+     [Static (P+P)] Relative MPJPE reduction: +42.33%
+     [TCN Lite] Relative MPJPE reduction: +39.08%
+     [TTL Lite] Relative MPJPE reduction: +25.75%
+     [Transformer] Relative MPJPE reduction: +19.76%
+
+═════════════════════════════════════════════════════════════════════════════════════
+  📊 RESULTS WITH 3D GLOBAL DISPLACEMENT (Test Set (95th percentile))
+═════════════════════════════════════════════════════════════════════════════════════
+  • PivotNet classification accuracy: 89.64%
+  ────────────────────────────────────────────────────────────────────────────────
+
+  1) MPJPE (95th percentile), global frame
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+     Joint               Static(P+P)  Oracle(GT Piv)         TCN Lite         TTL Lite      Transformer    Analytical      Winner
+     ──────────────  ───────────────  ───────────────  ───────────────  ───────────────  ───────────────  ────────────  ──────────
+     hip_r                  0.2747 m         0.2988 m        0.0541 m         0.0833 m         0.0580 m      0.1173 m         TCN
+     hip_l                  0.2741 m         0.2993 m        0.0542 m         0.0835 m         0.0558 m      0.1086 m         TCN
+     knee_r                 0.2688 m         0.2964 m        0.0658 m         0.0958 m         0.0860 m      0.1273 m         TCN
+     knee_l                 0.2699 m         0.2965 m        0.0702 m         0.0931 m         0.0819 m      0.1373 m         TCN
+     ankle_r                0.2576 m         0.2861 m        0.0708 m         0.1013 m         0.0988 m      0.1213 m         TCN
+     ankle_l                0.2570 m         0.2860 m        0.0782 m         0.1015 m         0.1019 m      0.1524 m         TCN
+     ──────────────  ───────────────  ───────────────  ───────────────  ───────────────  ───────────────  ────────────  ──────────
+     GENERAL                0.2670 m         0.2938 m         0.0655 m         0.0931 m         0.0804 m      0.1274 m         TCN
+
+  2) MAE (95th percentile), global frame
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+     Joint               Static(P+P)  Oracle(GT Piv)         TCN Lite         TTL Lite      Transformer    Analytical      Winner
+     ──────────────  ───────────────  ───────────────  ───────────────  ───────────────  ───────────────  ────────────  ──────────
+     hip_r                  0.0982 m         0.1045 m        0.0210 m         0.0285 m         0.0197 m      0.0494 m       Trans
+     hip_l                  0.0968 m         0.1040 m        0.0211 m         0.0284 m         0.0187 m      0.0444 m       Trans
+     knee_r                 0.0942 m         0.1015 m        0.0250 m         0.0348 m         0.0326 m      0.0554 m         TCN
+     knee_l                 0.0926 m         0.0999 m        0.0276 m         0.0347 m         0.0312 m      0.0602 m         TCN
+     ankle_r                0.0889 m         0.0968 m        0.0301 m         0.0375 m         0.0395 m      0.0525 m         TCN
+     ankle_l                0.0857 m         0.0945 m        0.0326 m         0.0382 m         0.0402 m      0.0657 m         TCN
+     ──────────────  ───────────────  ───────────────  ───────────────  ───────────────  ───────────────  ────────────  ──────────
+     GENERAL                0.0927 m         0.1002 m         0.0262 m         0.0337 m         0.0303 m      0.0546 m         TCN
+
+  3) RMSE (95th percentile), global frame
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+     Joint               Static(P+P)  Oracle(GT Piv)         TCN Lite         TTL Lite      Transformer    Analytical      Winner
+     ──────────────  ───────────────  ───────────────  ───────────────  ───────────────  ───────────────  ────────────  ──────────
+     hip_r                  0.1522 m         0.1650 m        0.0282 m         0.0425 m         0.0289 m      0.0694 m         TCN
+     hip_l                  0.1519 m         0.1648 m        0.0283 m         0.0425 m         0.0275 m      0.0631 m       Trans
+     knee_r                 0.1497 m         0.1642 m        0.0345 m         0.0495 m         0.0453 m      0.0765 m         TCN
+     knee_l                 0.1514 m         0.1645 m        0.0376 m         0.0495 m         0.0442 m      0.0794 m         TCN
+     ankle_r                0.1444 m         0.1607 m        0.0394 m         0.0530 m         0.0548 m      0.0726 m         TCN
+     ankle_l                0.1462 m         0.1604 m        0.0438 m         0.0543 m         0.0570 m      0.0867 m         TCN
+     ──────────────  ───────────────  ───────────────  ───────────────  ───────────────  ───────────────  ────────────  ──────────
+     GENERAL                0.1493 m         0.1633 m         0.0353 m         0.0486 m         0.0430 m      0.0746 m         TCN
+
+  🏆 RELATIVE IMPROVEMENTS VS THE ANALYTICAL METHOD (positive values mean improvement):
+     [Static network (P+P)]
+       • MPJPE error reduction: -109.63%
+       • MAE error reduction:   -69.78%
+
+     [TCN Lite]
+       • MPJPE error reduction: +48.54%
+       • MAE error reduction:   +51.96%
+
+     [TTL Lite]
+       • MPJPE error reduction: +26.91%
+       • MAE error reduction:   +38.31%
+
+     [Transformer]
+       • MPJPE error reduction: +36.88%
+       • MAE error reduction:   +44.46%
+
+═════════════════════════════════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════════════════════════════════════
+  ✓ Trajectory and global error plots saved to: nn-results/full_neural_vs_analytical/global_trajectory_and_error.png
+
+  🎥 Generating 3D GIF animation with global displacement (400 frames)...
+  ✓ Animation with displacement saved to: nn-results/full_neural_vs_analytical/global_pipeline_comparison.gif
+

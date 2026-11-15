@@ -32,7 +32,7 @@ reproducibility/timing.sh               # 4. execution-time benchmark, run twice
 
 | Step | Output | What it does |
 |---|---|---|
-| 2 | `runs/committed/eval.log` | `evaluate_full_neural_vs_analytical.py` on the five test subjects of `data_split.json`, using the checkpoints in `nn-results/`. Compare with `nn-results/full_neural_vs_analytical/results-v4.txt`. |
+| 2 | `runs/committed/eval.log` | `evaluate_full_neural_vs_analytical.py` on the five test subjects of `data_split.json`, using the checkpoints in `nn-results/`. Compare with `nn-results/full_neural_vs_analytical/results-v5.txt`. |
 | 3 | `runs/seed_<s>/` | For each seed: `train_all.sh` (all five networks, `SEED=<s>`), then the same evaluation. The training logs go to `runs/seed_<s>/nn-results/train_logs/`. Finished seeds are skipped, so an interrupted run can be resumed by running the command again. To choose the seeds, pass them as arguments: `reproducibility/multiseed.sh 5 6 7`. |
 | 3b | stdout, `runs/aggregate.json` | Per-seed values and mean ± SD of the P95 MPJPE, MAE and RMSE (global and pelvis-relative); the improvement over the analytical pipeline; the best network for each seed; and a paired TCN Lite vs. Transformer test. |
 | 4 | `runs/timing/timing_<host>_run{1,2}.{json,log}` | `benchmark_timing.py`: streaming latency per 25-sample window (GPU, all CPU threads, one CPU thread), offline throughput, and analytical-pipeline cost per frame. The JSON also records the hardware and software versions and the checkpoint hashes. |
@@ -52,14 +52,14 @@ These are the values we obtained on two machines. Both used torch 2.15.0+cu132 a
 
 | | TCN Lite | TTL Lite | Transformer | Analytical |
 |---|---|---|---|---|
-| RTX 5070 | 0.0655 m | 0.0931 m | 0.0804 m | 0.1286 m |
-| RTX 4060 | 0.0656 m | 0.0931 m | 0.0804 m | 0.1286 m |
+| RTX 5070 | 0.0655 m | 0.0931 m | 0.0804 m | 0.1274 m |
+| RTX 4060 | 0.0656 m | 0.0931 m | 0.0804 m | 0.1274 m |
 
 **Retrained networks (step 3), global P95 MPJPE, mean ± SD (10 runs: 5 seeds × 2 machines):**
 
 | TCN Lite | TTL Lite | Transformer | Analytical |
 |---|---|---|---|
-| 0.094 ± 0.005 m | 0.095 ± 0.009 m | 0.080 ± 0.005 m (8 runs) | 0.1286 m |
+| 0.094 ± 0.005 m | 0.095 ± 0.009 m | 0.080 ± 0.005 m (8 runs) | 0.1274 m |
 
 - **Training is not bit-reproducible.** The code does not enable `torch.use_deterministic_algorithms`, and it trains with mixed precision on GPU. The same seed on two different GPUs gives slightly different weights.
 - **Expect the same spread, not the same digits.** The seed changes global MPJPE by about ±5 mm. The GPU model changes it much less.
