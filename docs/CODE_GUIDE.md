@@ -116,7 +116,7 @@ flowchart TD
   8. Height threshold for the pivot switch (`PIVOT_HEIGHT_THRESHOLDS`: [0.005, 0.01, 0.015] m).
   9. Angular-velocity threshold for the *swing override* (`SWING_VELOCITY_THRESHOLDS`: [0.3, 0.5, 0.7] rad/s).
 * **Size:** the full Cartesian product, 4 × 3 × 4 × 3 × 2 × 4 × 2 × 3 × 3 = 20,736 combinations. The EKF does not use the Madgwick gain, so the 3 gain values give identical EKF results and only 13,824 configurations are distinct.
-* **Selected configuration** (`DEFAULT_VALS`): 9 Hz, order 6, 20th percentile, Madgwick gain 0.02, Slerp clip 0.3, 100 calibration samples, Madgwick, pivot threshold 0.005 m, swing threshold 0.3 rad/s.
+* **Selected configuration** (`DEFAULT_VALS`): 9 Hz, order 6, 20th percentile, Madgwick gain 0.02, Slerp clip 0.5 (fixed midpoint), 100 calibration samples, Madgwick, pivot threshold 0.005 m, swing threshold 0.3 rad/s.
 * **Output:** runs the combinations with parallel processing (`multiprocessing.Pool`) and saves the results to `Results/experiment_matrix/experiment_matrix.csv`.
 
 #### 📄 `analyze_results.py`

@@ -143,6 +143,11 @@ Full evaluation in `nn-results/full_neural_vs_analytical/results-v4.txt`; the pr
 
 Consequence for the paper: the static network now has the **best pelvis-relative MPJPE** (0.034 m vs 0.036 m for TCN Lite), but it is still much worse in the global frame (0.27 m vs 0.066 m). `v2_manuscript/template.tex` and the figures in `v2_manuscript/figures/` are already updated with these values.
 
+## Analytical pipeline: Slerp clip 0.5 (2026-11-15)
+
+A full re-run of the 20,736-configuration grid (`experiment_matrix.py`, training split) found the optimum at the previously documented values except `slerp_clip_min` = 0.5 (training centroid error 0.1780 m, versus 0.1804 m with 0.3; validation 0.1670 m, test 0.1756 m). Because `slerp_clip_max` = 1 − `slerp_clip_min`, this fixes the hip Slerp weight at 0.5: the pelvis is the Slerp midpoint of the two femurs. All scripts now use 0.5/0.5. The networks are unaffected; the analytical pipeline changes from 0.1286 to 0.1274 m global MPJPE (relative MPJPE 0.0586 → 0.0587 m). Full evaluation with the committed checkpoints on an RTX 5070: `nn-results/full_neural_vs_analytical/results-v5.txt` (results-v4.txt used 0.3).
+
+
 ## Evaluation
 
 ```bash

@@ -354,8 +354,8 @@ def get_orientation(
     mcd_data,
     pca_percentile=5,
     madgwick_gain=0.01,
-    slerp_clip_min=0.3,
-    slerp_clip_max=0.7,
+    slerp_clip_min=0.5,
+    slerp_clip_max=0.5,
     calibration_samples=60,
     fusion_filter="madgwick",
 ) -> dict[str, np.ndarray]:
@@ -565,7 +565,7 @@ def get_orientation(
             # Velocity-based weighting: if rf is still, the weight tends to 0.
             weight = vel_rf / total_vel
 
-        # Clip the weight (0.3 to 0.7) so the hip is never fused 100% with a single femur, avoiding rigidity
+        # Clip the weight to [slerp_clip_min, slerp_clip_max]. The selected 0.5/0.5 (grid-search optimum) fixes it at 0.5: the pelvis is the Slerp midpoint of both femurs
         weight = np.clip(weight, slerp_clip_min, slerp_clip_max)
 
         slerp = Slerp([0, 1], R.concatenate([quats["rf"][i], quats["lf"][i]]))
@@ -643,8 +643,8 @@ def mcd_reconstruction(
     mcd_data: dict[str, np.ndarray],
     pca_percentile=5,
     madgwick_gain=0.01,
-    slerp_clip_min=0.3,
-    slerp_clip_max=0.7,
+    slerp_clip_min=0.5,
+    slerp_clip_max=0.5,
     calibration_samples=60,
     fusion_filter="madgwick",
     pivot_height_threshold=0.01,
@@ -1003,8 +1003,8 @@ def process_files(
     filter_order=6,
     pca_percentile=5,
     madgwick_gain=0.01,
-    slerp_clip_min=0.3,
-    slerp_clip_max=0.7,
+    slerp_clip_min=0.5,
+    slerp_clip_max=0.5,
     calibration_samples=60,
     fusion_filter="madgwick",
     pivot_height_threshold=0.01,
