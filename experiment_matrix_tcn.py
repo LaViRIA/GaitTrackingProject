@@ -1,41 +1,41 @@
 """
-Matriz de Experimentación para Red Neuronal TCN Lite (nn_tcn_lite.py)
+Experiment matrix for the TCN Lite neural network (nn_tcn_lite.py)
 ====================================================================
 
-Arquitectura / Propósito:
-  - Realiza una búsqueda exhaustiva o dirigida (Grid / Random Search) sobre los hiperparámetros
-    clave de entrenamiento y partición de datos para la red GaitMultiTaskNetTCN:
+Architecture / purpose:
+  - Runs an exhaustive or targeted search (grid / random search) over the key training
+    and data-split hyperparameters of the GaitMultiTaskNetTCN network:
       1. Learning Rate (lr)
       2. Batch Size
-      3. Window Size (duración temporal de la ventana en frames)
-      4. Window Stride (desplazamiento / solapamiento entre ventanas)
-      5. Número de sujetos de prueba (n_test_subjects)
-      6. Número de sujetos de validación (n_val_subjects)
+      3. Window Size (time length of the window in frames)
+      4. Window Stride (shift / overlap between windows)
+      5. Number of test subjects (n_test_subjects)
+      6. Number of validation subjects (n_val_subjects)
 
-  - Salidas generadas:
-      - Archivo CSV con el registro detallado de cada corrida:
+  - Outputs:
+      - CSV file with the detailed record of each run:
         `nn-results/experiment_matrix_tcn/experiment_matrix_tcn.csv`
-      - Gráficas de análisis y heatmaps de interacción:
+      - Analysis plots and interaction heatmaps:
         `nn-results/experiment_matrix_tcn/heatmaps/`
-      - Tabla comparativa de los mejores modelos (Top 10):
+      - Comparison table of the best models (top 10):
         `nn-results/experiment_matrix_tcn/summary_table.png`
-      - Checkpoint del mejor modelo global:
+      - Checkpoint of the best global model:
         `nn-results/experiment_matrix_tcn/checkpoints/best_grid_tcn_lite.pt`
 
-Uso:
-    # Ejecutar grid search dirigido (recomendado):
+Usage:
+    # Run the targeted grid search (recommended):
     python experiment_matrix_tcn.py
 
-    # Búsqueda aleatoria de N combinaciones:
+    # Random search over N combinations:
     python experiment_matrix_tcn.py --mode random --n-trials 20
 
-    # Ajustar épocas máximas y paciencia de early stopping:
+    # Set the maximum epochs and the early-stopping patience:
     python experiment_matrix_tcn.py --epochs 60 --patience 10
 
-    # Solo generar gráficas y análisis a partir de un CSV existente:
+    # Only generate plots and analysis from an existing CSV:
     python experiment_matrix_tcn.py --analyze-only
 
-Autor: GaitTracking Project
+Author: GaitTracking Project
 """
 
 import sys
@@ -52,7 +52,7 @@ from collections import defaultdict
 import numpy as np
 import matplotlib
 
-matplotlib.use("Agg")  # Backend no interactivo para guardado rápido de gráficos
+matplotlib.use("Agg")  # Non-interactive backend for fast plot saving
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 
@@ -60,7 +60,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-# Importar componentes de la red TCN Lite y utilidades de carga
+# Import the TCN Lite network components and the loading utilities
 from models.nn_tcn_lite import (
     GaitMultiTaskNetTCN,
     GaitDataset,
@@ -80,24 +80,24 @@ from models.nn_tcn_lite import (
 )
 
 # ═══════════════════════════════════════════════════════════════════════
-#  CONFIGURACIÓN DE LA MATRIZ DE HIPERPARÁMETROS
+#  HYPERPARAMETER MATRIX CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════
 
 DEFAULT_OUTPUT_DIR = Path("nn-results/experiment_matrix_tcn")
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-W = 74  # Ancho de formato de texto
+W = 74  # Text format width
 
-# Grilla de Hiperparámetros
+# Hyperparameter grid
 GRID_HYPERPARAMS = {
-    "lr": [5e-4],  # Tasa de aprendizaje
-    "batch_size": [24],  # Tamaño del batch
-    "window_size": [50],  # Frames por ventana (1.0s, 1.5s, 2.0s a 100Hz)
-    "window_stride": [3],  # Solapamiento (desplazamiento en frames)
-    "n_test_subjects": [3],  # Sujetos en conjunto de prueba
-    "n_val_subjects": [3],  # Sujetos en conjunto de validación
+    "lr": [5e-4],  # Learning rate
+    "batch_size": [24],  # Batch size
+    "window_size": [50],  # Frames per window
+    "window_stride": [3],  # Overlap (shift in frames)
+    "n_test_subjects": [3],  # Subjects in the test set
+    "n_val_subjects": [3],  # Subjects in the validation set
 }
 
-# Configuración Base / Referencia para comparativas marginales
+# Base / reference configuration for marginal comparisons
 BASELINE_CONFIG = {
     "lr": 5e-4,
     "batch_size": 32,
@@ -109,15 +109,15 @@ BASELINE_CONFIG = {
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  GENERACIÓN DEL ESPACIO DE BÚSQUEDA
+#  SEARCH-SPACE GENERATION
 # ═══════════════════════════════════════════════════════════════════════
 
 
 def generate_targeted_grid(grid_dict: dict, baseline: dict) -> list[dict]:
     """
-    Genera una grilla dirigida (Targeted Grid) variando un hiperparámetro a la vez
-    respecto a la línea base, más combinaciones cruzadas de los parámetros más sensibles.
-    Reduce el espacio combinatorial de cientos a unas pocas decenas representativas.
+    Generate a targeted grid that varies one hyperparameter at a time
+    around the baseline, plus cross combinations of the most sensitive parameters.
+    Reduces the combinatorial space from hundreds to a few dozen representative runs.
     """
     combinations = []
     seen = set()
@@ -128,17 +128,17 @@ def generate_targeted_grid(grid_dict: dict, baseline: dict) -> list[dict]:
             seen.add(key)
             combinations.append(c)
 
-    # 1. Caso base
+    # 1. Base case
     add_combo(baseline.copy())
 
-    # 2. Variaciones individuales de cada hiperparámetro
+    # 2. Individual variations of each hyperparameter
     for param, values in grid_dict.items():
         for val in values:
             combo = baseline.copy()
             combo[param] = val
             add_combo(combo)
 
-    # 3. Interacciones clave: LR x Batch Size
+    # 3. Key interactions: LR x Batch Size
     for lr in grid_dict["lr"]:
         for bs in grid_dict["batch_size"]:
             combo = baseline.copy()
@@ -146,16 +146,16 @@ def generate_targeted_grid(grid_dict: dict, baseline: dict) -> list[dict]:
             combo["batch_size"] = bs
             add_combo(combo)
 
-    # 4. Interacciones clave: Window Size x Stride
+    # 4. Key interactions: Window Size x Stride
     for ws in grid_dict["window_size"]:
         for st in grid_dict["window_stride"]:
-            if st < ws:  # Stride debe ser menor que la ventana
+            if st < ws:  # The stride must be smaller than the window
                 combo = baseline.copy()
                 combo["window_size"] = ws
                 combo["window_stride"] = st
                 add_combo(combo)
 
-    # 5. Interacciones clave: n_test x n_val
+    # 5. Key interactions: n_test x n_val
     for nt in grid_dict["n_test_subjects"]:
         for nv in grid_dict["n_val_subjects"]:
             combo = baseline.copy()
@@ -167,7 +167,7 @@ def generate_targeted_grid(grid_dict: dict, baseline: dict) -> list[dict]:
 
 
 def generate_full_grid(grid_dict: dict) -> list[dict]:
-    """Genera el producto cartesiano completo de todos los hiperparámetros."""
+    """Generate the full Cartesian product of all the hyperparameters."""
     keys = list(grid_dict.keys())
     values = list(grid_dict.values())
     combinations = []
@@ -179,7 +179,7 @@ def generate_full_grid(grid_dict: dict) -> list[dict]:
 
 
 def generate_random_grid(grid_dict: dict, n_trials: int, seed: int = 42) -> list[dict]:
-    """Genera N combinaciones aleatorias del espacio de búsqueda."""
+    """Generate N random combinations of the search space."""
     random.seed(seed)
     full = generate_full_grid(grid_dict)
     random.shuffle(full)
@@ -187,7 +187,7 @@ def generate_random_grid(grid_dict: dict, n_trials: int, seed: int = 42) -> list
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  CARGA Y CACHÉ DEL DATASET EN MEMORIA
+#  DATASET LOADING AND IN-MEMORY CACHE
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -195,18 +195,18 @@ def load_and_cache_dataset(
     dataset_path: Path,
 ) -> tuple[dict[str, list], dict[str, list], list[str]]:
     """
-    Lee y procesa todas las capturas del dataset una sola vez en memoria RAM.
-    Evita lecturas de disco y filtrado repetido en cada iteración de la matriz.
+    Read and process every capture of the dataset once, in RAM.
+    Avoids disk reads and repeated filtering in every iteration of the matrix.
     """
     print()
     print("═" * W)
-    print("  📂 CARGANDO Y PRE-PROCESANDO DATASET COMPLETO EN MEMORIA")
+    print("  📂 LOADING AND PRE-PROCESSING THE FULL DATASET IN MEMORY")
     print("═" * W)
     t0 = time.time()
 
     captures_info = discover_captures(dataset_path)
     if len(captures_info) == 0:
-        print(f"  [ERROR] No se encontraron capturas en {dataset_path}")
+        print(f"  [ERROR] No captures found in {dataset_path}")
         sys.exit(1)
 
     subjects_data = defaultdict(list)
@@ -225,16 +225,16 @@ def load_and_cache_dataset(
     elapsed = time.time() - t0
 
     print(
-        f"  ✓ {total_caps} capturas procesadas de {len(available_subjects)} sujetos en {elapsed:.2f}s"
+        f"  ✓ {total_caps} captures processed from {len(available_subjects)} subjects in {elapsed:.2f}s"
     )
-    print(f"  Sujetos disponibles: {available_subjects}")
+    print(f"  Available subjects: {available_subjects}")
     print("═" * W)
 
     return subjects_data, file_paths_by_subject, available_subjects
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  ENTRENAMIENTO Y EVALUACIÓN DE UNA COMBINACIÓN
+#  TRAINING AND EVALUATION OF ONE COMBINATION
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -250,11 +250,11 @@ def run_single_experiment(
     checkpoints_dir: Path | None = None,
 ) -> dict:
     """
-    Ejecuta un experimento completo para una combinación de hiperparámetros:
-      1. Realiza la partición Train/Val/Test según n_test y n_val.
-      2. Construye Datasets y DataLoaders con window_size y window_stride.
-      3. Entrena GaitMultiTaskNetTCN con early stopping.
-      4. Evalúa exhaustivamente en el conjunto de prueba (MPJPE, MAE, Pearson, ATE).
+    Run a complete experiment for one hyperparameter combination:
+      1. Split Train/Val/Test according to n_test and n_val.
+      2. Build the datasets and data loaders with window_size and window_stride.
+      3. Train GaitMultiTaskNetTCN with early stopping.
+      4. Evaluate thoroughly on the test set (MPJPE, MAE, Pearson, ATE).
     """
     lr = config["lr"]
     batch_size = config["batch_size"]
@@ -263,14 +263,14 @@ def run_single_experiment(
     n_test = config["n_test_subjects"]
     n_val = config["n_val_subjects"]
 
-    # Fijar semillas para reproducibilidad del split
+    # Set the seeds for a reproducible split
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    # 1. División de Sujetos
+    # 1. Subject split
     shuffled_subjects = available_subjects.copy()
     random.shuffle(shuffled_subjects)
 
@@ -287,7 +287,7 @@ def run_single_experiment(
     test_captures = [c for s in test_subjects for c in subjects_data[s]]
     test_file_paths = [p for s in test_subjects for p in file_paths_by_subject[s]]
 
-    # 2. Construcción de Datasets
+    # 2. Dataset construction
     train_dataset = GaitDataset(
         train_captures,
         window_size=window_size,
@@ -299,12 +299,12 @@ def run_single_experiment(
     val_dataset = GaitDataset(
         val_captures,
         window_size=window_size,
-        stride=window_size,  # Sin solapamiento en validación
+        stride=window_size,  # No overlap in validation
         stats=norm_stats,
     )
 
     if len(train_dataset) == 0 or len(val_dataset) == 0:
-        print(f"  [AVISO Exp {exp_id}] Ventanas insuficientes para esta configuración.")
+        print(f"  [NOTICE Exp {exp_id}] Not enough windows for this configuration.")
         return None
 
     train_loader = DataLoader(
@@ -323,7 +323,7 @@ def run_single_experiment(
         pin_memory=True,
     )
 
-    # 3. Instanciar Modelo TCN
+    # 3. Instantiate the TCN model
     model = GaitMultiTaskNetTCN(input_dim=INPUT_DIM, output_dim=OUTPUT_DIM).to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scaler = torch.amp.GradScaler("cuda", enabled=(DEVICE.type == "cuda"))
@@ -331,7 +331,7 @@ def run_single_experiment(
         optimizer, T_0=25, T_mult=2, eta_min=lr * 0.01
     )
 
-    # 4. Bucle de Entrenamiento
+    # 4. Training loop
     best_val_loss = float("inf")
     best_epoch = 0
     patience_cnt = 0
@@ -358,11 +358,11 @@ def run_single_experiment(
 
     train_duration = time.time() - t_train_start
 
-    # Cargar mejor estado para evaluación
+    # Load the best state for evaluation
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    # 5. Evaluación en Test Set
+    # 5. Evaluation on the test set
     eval_metrics = evaluate_on_captures(
         model,
         test_captures,
@@ -376,7 +376,7 @@ def run_single_experiment(
     rmse = eval_metrics.get("rmse", {})
     disp = eval_metrics.get("displacement", {})
 
-    # Guardar checkpoint si corresponde
+    # Save the checkpoint if applicable
     if checkpoints_dir is not None:
         checkpoints_dir.mkdir(parents=True, exist_ok=True)
         ckpt_path = checkpoints_dir / f"tcn_exp_{exp_id:03d}.pt"
@@ -393,7 +393,7 @@ def run_single_experiment(
             ckpt_path,
         )
 
-    # Compilar registro del resultado
+    # Compile the result record
     result_record = {
         "exp_id": exp_id,
         "lr": lr,
@@ -428,19 +428,19 @@ def run_single_experiment(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  ANÁLISIS ESTADÍSTICO Y GENERACIÓN DE GRÁFICAS
+#  STATISTICAL ANALYSIS AND PLOT GENERATION
 # ═══════════════════════════════════════════════════════════════════════
 
 
 def generate_analysis_plots(csv_path: Path, output_dir: Path):
     """
-    Genera gráficos de análisis a partir del archivo CSV de resultados:
-      1. Heatmaps de interacción entre hiperparámetros
-      2. Tendencias individuales (Marginal effects)
-      3. Tabla de resumen con el Top 10 mejores modelos
+    Generate analysis plots from the results CSV file:
+      1. Interaction heatmaps between hyperparameters
+      2. Individual trends (marginal effects)
+      3. Summary table with the top 10 models
     """
     if not csv_path.exists():
-        print(f"  [ERROR] No se encontró el archivo CSV en {csv_path}")
+        print(f"  [ERROR] CSV file not found at {csv_path}")
         return
 
     records = []
@@ -455,7 +455,7 @@ def generate_analysis_plots(csv_path: Path, output_dir: Path):
             records.append(row)
 
     if len(records) == 0:
-        print("  [ERROR] El archivo CSV está vacío.")
+        print("  [ERROR] The CSV file is empty.")
         return
 
     plots_dir = output_dir / "plots"
@@ -465,17 +465,17 @@ def generate_analysis_plots(csv_path: Path, output_dir: Path):
 
     print()
     print("═" * W)
-    print(f"  🎨 GENERANDO ANÁLISIS Y GRÁFICAS ({len(records)} EXPERIMENTOS)")
+    print(f"  🎨 GENERATING ANALYSIS AND PLOTS ({len(records)} EXPERIMENTS)")
     print("═" * W)
 
-    # 1. Gráficas de Tendencia Unidimensional
+    # 1. One-dimensional trend plots
     params_to_analyze = [
         ("lr", "Learning Rate (lr)", True),
         ("batch_size", "Batch Size", False),
         ("window_size", "Window Size (frames)", False),
         ("window_stride", "Window Stride (frames)", False),
-        ("n_test_subjects", "N° Sujetos de Test", False),
-        ("n_val_subjects", "N° Sujetos de Validación", False),
+        ("n_test_subjects", "No. of test subjects", False),
+        ("n_val_subjects", "No. of validation subjects", False),
     ]
 
     fig, axes = plt.subplots(2, 3, figsize=(16, 10))
@@ -495,7 +495,7 @@ def generate_analysis_plots(csv_path: Path, output_dir: Path):
 
         x_vals = np.array(sorted_keys)
         ax.plot(
-            x_vals, means, "o-", color="royalblue", linewidth=2.2, label="MPJPE Medio"
+            x_vals, means, "o-", color="royalblue", linewidth=2.2, label="Mean MPJPE"
         )
         ax.fill_between(
             x_vals,
@@ -505,19 +505,19 @@ def generate_analysis_plots(csv_path: Path, output_dir: Path):
             alpha=0.18,
         )
         ax.plot(
-            x_vals, mins, "s--", color="crimson", linewidth=1.5, label="Mejor MPJPE"
+            x_vals, mins, "s--", color="crimson", linewidth=1.5, label="Best MPJPE"
         )
 
         if is_log:
             ax.set_xscale("log")
-        ax.set_title(f"Impacto de {param_label}", fontweight="bold", fontsize=11)
+        ax.set_title(f"Impact of {param_label}", fontweight="bold", fontsize=11)
         ax.set_xlabel(param_label)
         ax.set_ylabel("MPJPE en Test (mm)")
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=8)
 
     plt.suptitle(
-        "Análisis Marginal de Hiperparámetros — GaitMultiTaskNetTCN",
+        "Marginal hyperparameter analysis — GaitMultiTaskNetTCN",
         fontsize=14,
         fontweight="bold",
     )
@@ -546,7 +546,7 @@ def generate_analysis_plots(csv_path: Path, output_dir: Path):
         save_path=heatmaps_dir / "heatmap_window_size_vs_stride.png",
     )
 
-    # 4. Tabla de Resumen Top 10
+    # 4. Top-10 summary table
     generate_summary_table_image(records, output_dir / "summary_table.png")
 
 
@@ -558,7 +558,7 @@ def plot_heatmap_2d(
     title: str,
     save_path: Path,
 ):
-    """Genera un mapa de calor 2D para la interacción entre dos hiperparámetros."""
+    """Plot a 2D heatmap of the interaction between two hyperparameters."""
     x_vals = sorted(
         list(set(r[x_key] for r in records if x_key in r and metric_key in r))
     )
@@ -589,7 +589,7 @@ def plot_heatmap_2d(
     ax.set_yticks(range(len(y_vals)))
     ax.set_yticklabels(y_vals)
 
-    # Anotar valores en celdas
+    # Annotate the cell values
     for i in range(len(y_vals)):
         for j in range(len(x_vals)):
             val = matrix[i, j]
@@ -606,7 +606,7 @@ def plot_heatmap_2d(
                 )
 
     cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label("MPJPE Medio (mm)", rotation=270, labelpad=15)
+    cbar.set_label("Mean MPJPE (mm)", rotation=270, labelpad=15)
     ax.set_title(title, fontweight="bold", fontsize=12)
     ax.set_xlabel(x_key)
     ax.set_ylabel(y_key)
@@ -618,7 +618,7 @@ def plot_heatmap_2d(
 
 
 def generate_summary_table_image(records: list[dict], save_path: Path):
-    """Genera una imagen con la tabla formateada del Top 10 de mejores configuraciones."""
+    """Produce an image with the formatted table of the top 10 configurations."""
     sorted_records = sorted(
         records, key=lambda r: r.get("test_mpjpe_mean_mm", float("inf"))
     )[:10]
@@ -669,7 +669,7 @@ def generate_summary_table_image(records: list[dict], save_path: Path):
     table.set_fontsize(10)
     table.scale(1.2, 1.6)
 
-    # Estilos de encabezado y celdas
+    # Header and cell styles
     for col_idx in range(len(headers)):
         table[(0, col_idx)].set_facecolor("#2b5c8f")
         table[(0, col_idx)].set_text_props(color="white", fontweight="bold")
@@ -677,12 +677,12 @@ def generate_summary_table_image(records: list[dict], save_path: Path):
     for row_idx in range(1, len(rows) + 1):
         bg_color = "#f2f7fc" if row_idx % 2 == 0 else "white"
         if row_idx == 1:
-            bg_color = "#d4edda"  # Destacar #1 en verde claro
+            bg_color = "#d4edda"  # Highlight #1 in light green
         for col_idx in range(len(headers)):
             table[(row_idx, col_idx)].set_facecolor(bg_color)
 
     plt.title(
-        "Top 10 Mejores Configuraciones — Matriz de Experimentación TCN Lite",
+        "Top 10 configurations — TCN Lite experiment matrix",
         fontsize=13,
         fontweight="bold",
         pad=20,
@@ -694,49 +694,49 @@ def generate_summary_table_image(records: list[dict], save_path: Path):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  EJECUCIÓN PRINCIPAL (CLI)
+#  MAIN EXECUTION (CLI)
 # ═══════════════════════════════════════════════════════════════════════
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Matriz de experimentación para GaitMultiTaskNetTCN (TCN Lite)"
+        description="Experiment matrix for GaitMultiTaskNetTCN (TCN Lite)"
     )
     parser.add_argument(
-        "--dataset", type=str, default=str(DEFAULT_DATASET_PATH), help="Ruta al dataset"
+        "--dataset", type=str, default=str(DEFAULT_DATASET_PATH), help="Path to the dataset"
     )
     parser.add_argument(
         "--output-dir",
         type=str,
         default=str(DEFAULT_OUTPUT_DIR),
-        help="Directorio de resultados",
+        help="Results directory",
     )
     parser.add_argument(
         "--mode",
         type=str,
         choices=["targeted", "full", "random"],
         default="targeted",
-        help="Modo de grilla",
+        help="Grid mode",
     )
     parser.add_argument(
-        "--n-trials", type=int, default=20, help="N° de ensayos si mode=random"
+        "--n-trials", type=int, default=20, help="No. of trials if mode=random"
     )
     parser.add_argument(
-        "--epochs", type=int, default=50, help="Épocas máximas por experimento"
+        "--epochs", type=int, default=50, help="Maximum epochs per experiment"
     )
     parser.add_argument(
-        "--patience", type=int, default=10, help="Paciencia de early stopping"
+        "--patience", type=int, default=10, help="Early-stopping patience"
     )
-    parser.add_argument("--seed", type=int, default=42, help="Semilla aleatoria")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
         "--skip-existing",
         action="store_true",
-        help="Omitir combinaciones ya calculadas en el CSV",
+        help="Skip combinations already computed in the CSV",
     )
     parser.add_argument(
         "--analyze-only",
         action="store_true",
-        help="Solo generar gráficos a partir del CSV existente",
+        help="Only generate plots from the existing CSV",
     )
     args = parser.parse_args()
 
@@ -749,7 +749,7 @@ def main():
         generate_analysis_plots(csv_path, output_dir)
         return
 
-    # 1. Generar combinaciones a evaluar
+    # 1. Generate the combinations to evaluate
     if args.mode == "targeted":
         combinations = generate_targeted_grid(GRID_HYPERPARAMS, BASELINE_CONFIG)
     elif args.mode == "full":
@@ -761,21 +761,21 @@ def main():
 
     print()
     print("═" * W)
-    print("  🚀 MATRIZ DE EXPERIMENTACIÓN: RED TCN LITE MULTITAREA")
+    print("  🚀 EXPERIMENT MATRIX: MULTI-TASK TCN LITE NETWORK")
     print("═" * W)
-    print(f"  Modo:              {args.mode.upper()}")
-    print(f"  Total corridas:    {len(combinations)}")
-    print(f"  Épocas máx/exp:    {args.epochs} (Paciencia: {args.patience})")
+    print(f"  Mode:              {args.mode.upper()}")
+    print(f"  Total runs:        {len(combinations)}")
+    print(f"  Max epochs/exp:    {args.epochs} (patience: {args.patience})")
     print(f"  Device:            {DEVICE}")
-    print(f"  Salida:            {output_dir.resolve()}")
+    print(f"  Output:            {output_dir.resolve()}")
     print("═" * W)
 
-    # 2. Cargar Dataset en memoria una sola vez
+    # 2. Load the dataset into memory once
     subjects_data, file_paths_by_subject, available_subjects = load_and_cache_dataset(
         Path(args.dataset)
     )
 
-    # 3. Leer experimentos previos si se desea reanudar
+    # 3. Read previous experiments if resuming
     existing_exp_keys = set()
     csv_exists = csv_path.exists()
     fieldnames = [
@@ -822,7 +822,7 @@ def main():
                 )
                 existing_exp_keys.add(key)
         print(
-            f"  ℹ️ Reanudando: {len(existing_exp_keys)} experimentos ya completados previamente."
+            f"  ℹ️ Resuming: {len(existing_exp_keys)} experiments already completed."
         )
 
     csv_file = open(csv_path, "a" if csv_exists else "w", newline="", encoding="utf-8")
@@ -835,7 +835,7 @@ def main():
     best_global_config = None
     t_matrix_start = time.time()
 
-    # 4. Bucle de Experimentación
+    # 4. Experiment loop
     for exp_idx, combo in enumerate(combinations, 1):
         combo_key = (
             combo["lr"],
@@ -847,13 +847,13 @@ def main():
         )
         if args.skip_existing and combo_key in existing_exp_keys:
             print(
-                f"  ⏭️ [{exp_idx:02d}/{len(combinations):02d}] Omitiendo combo ya procesado: {combo}"
+                f"  ⏭️ [{exp_idx:02d}/{len(combinations):02d}] Skipping already processed combo: {combo}"
             )
             continue
 
         print()
         print("─" * W)
-        print(f"  🧪 EXPERIMENTO [{exp_idx:02d}/{len(combinations):02d}]")
+        print(f"  🧪 EXPERIMENT [{exp_idx:02d}/{len(combinations):02d}]")
         print(
             f"     LR={combo['lr']:.1e} │ Batch={combo['batch_size']} │ Window={combo['window_size']} │ Stride={combo['window_stride']} │ Test={combo['n_test_subjects']} │ Val={combo['n_val_subjects']}"
         )
@@ -879,14 +879,14 @@ def main():
             mpjpe_val = record["test_mpjpe_mean_mm"]
             ate_val = record["test_ate_mean_cm"]
             print(
-                f"     ★ Resultado: MPJPE = {mpjpe_val:.1f} mm │ ATE = {ate_val:.1f} cm │ Época {record['best_epoch']} │ {time.time() - t_exp_0:.1f}s"
+                f"     ★ Result: MPJPE = {mpjpe_val:.1f} mm │ ATE = {ate_val:.1f} cm │ Epoch {record['best_epoch']} │ {time.time() - t_exp_0:.1f}s"
             )
 
             if mpjpe_val < best_global_mpjpe:
                 best_global_mpjpe = mpjpe_val
                 best_global_config = combo
                 print(
-                    f"     🏆 ¡NUEVO MEJOR MODELO GLOBAL! MPJPE = {best_global_mpjpe:.1f} mm"
+                    f"     🏆 NEW BEST GLOBAL MODEL! MPJPE = {best_global_mpjpe:.1f} mm"
                 )
 
     csv_file.close()
@@ -894,16 +894,16 @@ def main():
 
     print()
     print("═" * W)
-    print(f"  ✅ MATRIZ DE EXPERIMENTACIÓN COMPLETADA EN {total_time / 60:.2f} MINUTOS")
+    print(f"  ✅ EXPERIMENT MATRIX COMPLETED IN {total_time / 60:.2f} MINUTES")
     if best_global_config:
         print(
-            f"  🏆 Mejor Configuración Encontrada: MPJPE = {best_global_mpjpe:.1f} mm"
+            f"  🏆 Best configuration found: MPJPE = {best_global_mpjpe:.1f} mm"
         )
         for k, v in best_global_config.items():
             print(f"     • {k:20s}: {v}")
     print("═" * W)
 
-    # 5. Generar Gráficas y Reporte
+    # 5. Generate plots and report
     generate_analysis_plots(csv_path, output_dir)
 
 

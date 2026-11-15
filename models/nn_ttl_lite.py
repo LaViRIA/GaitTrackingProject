@@ -1,26 +1,26 @@
 """
-Red Neuronal: TTL Lite (TCN + Transformer Lite)
+Neural network: TTL Lite (TCN + Transformer Lite)
 ==============================================
-Arquitectura:
-  - Red Híbrida compuesta por:
-      1. Extractor local TCN (Convoluciones 1D dilatadas no causales, padding simétrico).
-      2. Capa BiLSTM recurrente para contexto bidireccional secuencial.
-      3. Transformer Encoder con Multi-Head Self-Attention para correlaciones de largo alcance.
-      4. Cabezal de regresión Multitarea (Pose 3D + Desplazamiento global).
-  - Función de pérdida profunda compuesta (deep_multitask_loss).
+Architecture:
+  - Hybrid network made of:
+      1. Local TCN extractor (non-causal dilated 1D convolutions, symmetric padding).
+      2. Recurrent BiLSTM layer for bidirectional sequential context.
+      3. Transformer encoder with multi-head self-attention for long-range correlations.
+      4. Multi-task regression head (3D pose + global displacement).
+  - Composite deep loss function (deep_multitask_loss).
 
-Propósito:
-  - Capturar simultáneamente dinámicas de marcha a corto plazo (impactos/pivote vía TCN) y dependencias
-    periódicas globales (ciclos de zancada vía Transformer) con una carga computacional compacta.
+Purpose:
+  - Capture both short-term gait dynamics (impacts/pivot via the TCN) and global periodic
+    dependencies (stride cycles via the Transformer) at a compact computational cost.
 
-Directorio de salida: nn-results/ttl_lite/
+Output directory: nn-results/ttl_lite/
 Checkpoints: nn-results/ttl_lite/checkpoints/best_ttl_lite.pt
 
-Uso:
-    python -m models.nn_ttl_lite                         # Entrenamiento + evaluación
-    python -m models.nn_ttl_lite --eval-only             # Solo evaluación
+Usage:
+    python -m models.nn_ttl_lite                         # Training + evaluation
+    python -m models.nn_ttl_lite --eval-only             # Evaluation only
 
-Autor: GaitTracking Project
+Author: GaitTracking Project
 """
 
 import sys
@@ -43,7 +43,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.amp import autocast, GradScaler
 
-# Importar utilidades existentes de carga de datos
+# Import the existing data-loading utilities
 from process_all import (
     read_mcd_file,
     read_aruco_file,
@@ -55,10 +55,10 @@ from process_all import (
 )
 
 # ═══════════════════════════════════════════════════════════════════════
-#  CONFIGURACIÓN
+#  CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════
 
-DATASET_PATH = Path("/home/badajoz/Documents/DataSet")
+DATASET_PATH = Path("DataSet")  # default: DataSet/ in the repository root (override with --dataset)
 DATA_SPLIT_PATH = Path("data_split.json")
 RESULTS_DIR = Path("nn-results/ttl_lite")
 CHECKPOINT_DIR = RESULTS_DIR / "checkpoints"
@@ -66,24 +66,24 @@ CHECKPOINT_NAME = "best_ttl_lite.pt"
 CHECKPOINT_PATH = CHECKPOINT_DIR / CHECKPOINT_NAME
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ── Datos ─────────────────────────────────────────────────────────────
-WINDOW_SIZE = 150  # muestras por ventana (1.5s a 100Hz)
-WINDOW_STRIDE = 25  # desplazamiento entre ventanas (0.25s overlap para dataset denso)
-CUTOFF_FREQ = 7  # Hz, filtro pasa-bajas del MCD
-FILTER_ORDER = 6  # orden del filtro Butterworth
+# ── Data ──────────────────────────────────────────────────────────────
+WINDOW_SIZE = 150  # samples per window (1.5s at 100Hz)
+WINDOW_STRIDE = 25  # shift between windows (0.25s overlap for a dense dataset)
+CUTOFF_FREQ = 7  # Hz, low-pass filter of the MCD
+FILTER_ORDER = 6  # Butterworth filter order
 
-# ── Modelo (TTL Lite) ─────────────────────────────────────────────────
-TCN_CHANNELS = [16, 16, 32]  # canales por bloque TCN
-TCN_KERNEL_SIZES = [7, 7, 5]  # tamaño de kernel por bloque
-TCN_DILATIONS = [1, 2, 4]  # dilatación por bloque
-LSTM_HIDDEN = 32  # neuronas ocultas del BiLSTM
-LSTM_LAYERS = 1  # capas del BiLSTM
-N_ATTENTION_HEADS = 2  # cabezas de atención (Transformer)
-N_ATTENTION_LAYERS = 2  # capas del Transformer
-HEAD_HIDDEN_DIM = 48  # neuronas en la capa oculta de las cabezas multitarea
-DROPOUT = 0.20  # mayor dropout para dataset pequeño
+# ── Model (TTL Lite) ──────────────────────────────────────────────────
+TCN_CHANNELS = [16, 16, 32]  # channels per TCN block
+TCN_KERNEL_SIZES = [7, 7, 5]  # kernel size per block
+TCN_DILATIONS = [1, 2, 4]  # dilation per block
+LSTM_HIDDEN = 32  # hidden units of the BiLSTM
+LSTM_LAYERS = 1  # BiLSTM layers
+N_ATTENTION_HEADS = 2  # attention heads (Transformer)
+N_ATTENTION_LAYERS = 2  # Transformer layers
+HEAD_HIDDEN_DIM = 48  # neurons in the hidden layer of the multi-task heads
+DROPOUT = 0.20  # higher dropout for a small dataset
 
-# ── Entrenamiento ────────────────────────────────────────────────────
+# ── Training ─────────────────────────────────────────────────────────
 BATCH_SIZE = 64
 LEARNING_RATE = 5e-4
 WEIGHT_DECAY = 1e-5
@@ -91,55 +91,55 @@ EPOCHS = 300
 PATIENCE = 60  # Early stopping
 GRAD_CLIP = 1.0
 
-# ── Pesos de loss ────────────────────────────────────────────────────
+# ── Loss weights ─────────────────────────────────────────────────────
 BONE_LOSS_WEIGHT = 0.1
 SMOOTH_LOSS_WEIGHT = 0.01
 HEIGHT_LOSS_WEIGHT = 0.02
 GLOBAL_JOINT_LOSS_WEIGHT = (
-    0.0  # Desactivado: redundante con mse_pose + mse_traj (evita ruido cruzado)
+    0.0  # Disabled: redundant with mse_pose + mse_traj (avoids cross noise)
 )
 DISP_LOSS_WEIGHT = (
-    0.5  # Recalibrado con escala dm (x10) para balance de gradientes pose/disp
+    0.5  # Recalibrated with the dm scale (x10) to balance pose/disp gradients
 )
-TRAJ_LOSS_WEIGHT = 0.3  # Trayectoria integrada dentro de la ventana (odometría)
-SPEED_LOSS_WEIGHT = 0.1  # Rapidez escalar instantánea (cadencia)
-BIAS_LOSS_WEIGHT = 0.5  # Pérdida de sesgo medio nulo (anti-drift acumulativo)
+TRAJ_LOSS_WEIGHT = 0.3  # Trajectory integrated within the window (odometry)
+SPEED_LOSS_WEIGHT = 0.1  # Instantaneous scalar speed (cadence)
+BIAS_LOSS_WEIGHT = 0.5  # Zero-mean bias loss (anti cumulative drift)
 DISP_SCALE_FACTOR = (
-    10.0  # Factor x10 (decímetros) para equilibrar magnitudes cuadráticas con la pose
+    10.0  # x10 factor (decimetres) to balance squared magnitudes against the pose
 )
 
-# ── Articulaciones ──────────────────────────────────────────────────
+# ── Joints ──────────────────────────────────────────────────────────
 JOINT_NAMES = ["hip_r", "hip_l", "knee_r", "knee_l", "ankle_r", "ankle_l"]
 N_JOINTS = 6
 N_COORDS = 3
 OUTPUT_DIM = N_JOINTS * N_COORDS  # 18
 
-# ── Sensores: 4 IMUs × (3 accel + 3 gyro) ──────────────────────────
+# ── Sensors: 4 IMUs × (3 accel + 3 gyro) ───────────────────────────
 IMU_NAMES = ["RF", "LF", "RT", "LT"]
 SENSOR_CHANNELS = len(IMU_NAMES) * 6  # 24
 
-# ── Features antropométricas: femur_length, tibia_length, hip_width, direction ─
+# ── Anthropometric features: femur_length, tibia_length, hip_width, direction ─
 ANTHROPOMETRIC_DIM = 4
 
 INPUT_DIM = SENSOR_CHANNELS + ANTHROPOMETRIC_DIM  # 28
 
-W = 72  # Ancho de las cajas de texto
+W = 72  # Width of the text boxes
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  CARGA Y PREPARACIÓN DE DATOS
+#  DATA LOADING AND PREPARATION
 # ═══════════════════════════════════════════════════════════════════════
 
 
 def discover_captures(dataset_path: Path) -> list[tuple[str, str, str]]:
     """
-    Descubre todos los pares MCD/ArUco en el dataset.
+    Find every MCD/ArUco pair in the dataset.
 
     Returns:
-        Lista de (mcd_path, aruco_path, subject_id).
+        List of (mcd_path, aruco_path, subject_id).
     """
     subjects = sorted(glob.glob("*", root_dir=str(dataset_path)))
-    # Filtrar sujetos numéricos, excluir sujeto 0 (calibración)
+    # Keep numeric subjects, exclude subject 0 (calibration)
     subjects = sorted([s for s in subjects if s.isdigit() and s != "0"], key=int)
 
     captures = []
@@ -155,41 +155,41 @@ def discover_captures(dataset_path: Path) -> list[tuple[str, str, str]]:
 
 def prepare_capture(mcd_path: str, aruco_path: str, crop: bool = True) -> dict | None:
     """
-    Procesa un par de archivos MCD/ArUco y retorna datos alineados
-    de sensores + posiciones ground truth.
+    Process an MCD/ArUco file pair and return aligned sensor data
+    and ground-truth positions.
 
     Args:
-        mcd_path: Ruta al archivo del sensor
-        aruco_path: Ruta al archivo ground truth
-        crop: Si es True (por defecto), recorta los datos al periodo donde hay ArUco válido.
-              Si es False, devuelve todos los datos del sensor y setea gt_mask para indicar validez.
+        mcd_path: Path to the sensor file
+        aruco_path: Path to the ground-truth file
+        crop: If True (default), crop the data to the period with valid ArUco.
+              If False, return all the sensor data and set gt_mask to flag validity.
 
     Returns:
-        dict con:
-            - 'sensor_data': np.ndarray [N, 24] (canales IMU filtrados)
+        dict with:
+            - 'sensor_data': np.ndarray [N, 24] (filtered IMU channels)
             - 'timestamps': np.ndarray [N] (ms)
-            - 'gt_relative': np.ndarray [N, 18] (6 articulaciones × 3, relativas a cadera)
-            - 'gt_hip': np.ndarray [N, 3] (posición absoluta de la cadera ArUco)
-            - 'gt_mask': np.ndarray [N] (bool, True donde GT es válido)
+            - 'gt_relative': np.ndarray [N, 18] (6 joints × 3, relative to the hip)
+            - 'gt_hip': np.ndarray [N, 3] (absolute ArUco hip position)
+            - 'gt_mask': np.ndarray [N] (bool, True where the GT is valid)
             - 'femur_length': float
             - 'tibia_length': float
             - 'direction': str ('L' o 'R')
-        None si hay error o datos insuficientes.
+        None if there is an error or insufficient data.
     """
     try:
-        # Cargar datos MCD (ya filtrados y en unidades correctas)
+        # Load the MCD data (already filtered and in the correct units)
         mcd_data = read_mcd_file(
             mcd_path, cutoff_freq=CUTOFF_FREQ, filter_order=FILTER_ORDER
         )
 
-        # Cargar datos ArUco
+        # Load the ArUco data
         aruco_data = read_aruco_file(aruco_path)
         direction = mcd_data["measures"]["direction"]
 
-        # Ajustar ArUco al origen (restar posición inicial del tobillo)
+        # Shift ArUco to the origin (subtract the initial ankle position)
         aruco_data = adjust_aruco_data(aruco_data, direction)
 
-        # Mapear llaves ArUco al formato del pipeline
+        # Map the ArUco keys to the pipeline format
         aruco_processed = {
             "hip": aruco_data["hip_position"],
             "knee_r": aruco_data["R_knee_position"],
@@ -198,25 +198,25 @@ def prepare_capture(mcd_path: str, aruco_path: str, crop: bool = True) -> dict |
             "ankle_l": aruco_data["L_ankle_position"],
         }
 
-        # Filtrado del ruido en la profundidad (Eje Y)
+        # Noise filtering of the depth (Y axis)
         t_aruco = aruco_processed["hip"]["time"]
         if len(t_aruco) > 1:
-            # Calcular frecuencia de muestreo (fs) promedio en Hz
+            # Compute the mean sampling frequency (fs) in Hz
             fs_aruco = 1000.0 / max(np.mean(np.diff(t_aruco)), 1.0)
             for key in aruco_processed:
                 y_data = aruco_processed[key]["data"][:, 1]
-                # Filtro pasa-bajas para suavizar la profundidad ruidosa
+                # Low-pass filter to smooth the noisy depth
                 try:
                     y_filtered = low_pass_filter(
                         y_data, cutoff_freq=2.0, fs=fs_aruco, order=3
                     )
                     aruco_processed[key]["data"][:, 1] = y_filtered
                 except Exception:
-                    pass  # En caso de que haya muy pocos datos para el filtro
+                    pass  # In case there are too few samples for the filter
 
-        # (Las longitudes óseas de fémur y tibia se calcularán a partir de las distancias 3D reales entre marcadores)
+        # (The femur and tibia bone lengths are computed from the real 3D distances between markers)
 
-        # ── Apilar canales de sensores: [N, 24] ──────────────────────
+        # ── Stack the sensor channels: [N, 24] ───────────────────────
         mcd_time = mcd_data["time"]
         N = len(mcd_time)
 
@@ -225,9 +225,9 @@ def prepare_capture(mcd_path: str, aruco_path: str, crop: bool = True) -> dict |
             sensor_data[:, idx * 6 : idx * 6 + 3] = mcd_data[f"acceleration_{imu}"]
             sensor_data[:, idx * 6 + 3 : idx * 6 + 6] = mcd_data[f"gyro_{imu}"]
 
-        # ── Interpolar posiciones ArUco a timestamps del MCD ─────────
-        # Encontrar el rango temporal válido donde TODAS las articulaciones
-        # ArUco (cadera central, rodillas y tobillos) tienen datos disponibles
+        # ── Interpolate the ArUco positions to the MCD timestamps ────
+        # Find the valid time range where ALL ArUco joints
+        # (hip centre, knees and ankles) have data available
         aruco_raw_keys = ["hip", "knee_r", "knee_l", "ankle_r", "ankle_l"]
         t_min_all = -np.inf
         t_max_all = np.inf
@@ -245,13 +245,13 @@ def prepare_capture(mcd_path: str, aruco_path: str, crop: bool = True) -> dict |
 
         valid_mcd_time = mcd_time[valid_time_mask]
 
-        # Interpolar cadera central ArUco
+        # Interpolate the ArUco hip centre
         hip_t = aruco_processed["hip"]["time"].astype(float)
         hip_pos = aruco_processed["hip"]["data"]
         hip_interp = [interp1d(hip_t, hip_pos[:, i], kind="linear") for i in range(3)]
         hip_at_mcd = np.column_stack([hip_interp[i](valid_mcd_time) for i in range(3)])
 
-        # Interpolar rodillas y tobillos a timestamps del MCD
+        # Interpolate knees and ankles to the MCD timestamps
         joints_at_mcd = {}
         for key in ["knee_r", "knee_l", "ankle_r", "ankle_l"]:
             aruco_t = aruco_processed[key]["time"].astype(float)
@@ -264,22 +264,22 @@ def prepare_capture(mcd_path: str, aruco_path: str, crop: bool = True) -> dict |
                 [joint_interp[i](valid_mcd_time) for i in range(3)]
             )
 
-        # ── Profundidad en Marcha Recta: Hip Center Y=0 y planos Sagitales +-1/2 hip_width ──
-        # Obtener ancho de cadera anthropométrico de las medidas del MCD
+        # ── Depth in straight walking: hip centre Y=0 and sagittal planes ±1/2 hip_width ──
+        # Get the anthropometric hip width from the MCD measurements
         raw_hw = float(mcd_data["measures"].get("hip_width", 0.25))
         hip_width = raw_hw  # if raw_hw > 0.05 else 0.25
         half_hw = hip_width / 2.0
 
-        # Signo de Y según dirección de marcha ('L' -> hip_r en +Y, 'R' -> hip_r en -Y)
+        # Sign of Y according to the walking direction ('L' -> hip_r at +Y, 'R' -> hip_r at -Y)
         side_sign = +1.0 if direction == "L" else -1.0
         half_hw_r = +half_hw * side_sign
         half_hw_l = -half_hw * side_sign
 
-        # Fijar centro pélvico Y = 0.0 (marcha en el plano sagital)
+        # Fix the pelvic centre at Y = 0.0 (walking in the sagittal plane)
         hip_at_mcd[:, 1] = 0.0
 
-        # ── Construir GT relativo con 6 articulaciones ───────────────
-        # Orden: hip_r, hip_l, knee_r, knee_l, ankle_r, ankle_l
+        # ── Build the relative GT with 6 joints ──────────────────────
+        # Order: hip_r, hip_l, knee_r, knee_l, ankle_r, ankle_l
         gt_relative = np.zeros((N, N_JOINTS * N_COORDS))
 
         knee_r_at_mcd = joints_at_mcd["knee_r"]
@@ -287,7 +287,7 @@ def prepare_capture(mcd_path: str, aruco_path: str, crop: bool = True) -> dict |
         ankle_r_at_mcd = joints_at_mcd["ankle_r"]
         ankle_l_at_mcd = joints_at_mcd["ankle_l"]
 
-        # Posiciones relativas al centro de la cadera [0, 0, 0]
+        # Positions relative to the hip centre [0, 0, 0]
         hip_r_rel = np.column_stack(
             [np.zeros(n_valid), np.full(n_valid, half_hw_r), np.zeros(n_valid)]
         )
@@ -337,7 +337,7 @@ def prepare_capture(mcd_path: str, aruco_path: str, crop: bool = True) -> dict |
         for j_idx, rel_pos in enumerate(all_rel_joints):
             gt_relative[valid_time_mask, j_idx * 3 : (j_idx + 1) * 3] = rel_pos
 
-        # ── Estimar longitudes óseas (fémur y tibia) directamente de las distancias 3D entre marcadores ──
+        # ── Estimate bone lengths (femur and tibia) directly from the 3D distances between markers ──
         femur_r_dists = np.linalg.norm(knee_r_rel - hip_r_rel, axis=1)
         femur_l_dists = np.linalg.norm(knee_l_rel - hip_l_rel, axis=1)
         tibia_r_dists = np.linalg.norm(ankle_r_rel - knee_r_rel, axis=1)
@@ -346,19 +346,19 @@ def prepare_capture(mcd_path: str, aruco_path: str, crop: bool = True) -> dict |
         femur_length = float(np.mean(np.concatenate([femur_r_dists, femur_l_dists])))
         tibia_length = float(np.mean(np.concatenate([tibia_r_dists, tibia_l_dists])))
 
-        # Almacenar posición absoluta de la cadera (centro pélvico Y=0)
+        # Store the absolute hip position (pelvic centre Y=0)
         gt_hip = np.zeros((N, 3))
         gt_hip[valid_time_mask] = hip_at_mcd
 
-        # Desplazamiento por cuadro de la cadera (velocidad discreta)
+        # Per-frame hip displacement (discrete velocity)
         gt_hip_disp = np.zeros((N, 3))
         hip_disp_valid = np.diff(hip_at_mcd, axis=0)
-        hip_disp_valid[:, 1] = 0.0  # Sin desplazamiento lateral Y para la marcha recta
+        hip_disp_valid[:, 1] = 0.0  # No lateral Y displacement for straight walking
         valid_indices = np.where(valid_time_mask)[0]
         if len(valid_indices) > 1:
             gt_hip_disp[valid_indices[1:]] = hip_disp_valid
 
-        # Recortar a la región válida para eficiencia en entrenamiento
+        # Crop to the valid region for training efficiency
         if crop:
             first_valid = int(np.argmax(valid_time_mask))
             last_valid = N - int(np.argmax(valid_time_mask[::-1])) - 1
@@ -393,16 +393,16 @@ def prepare_capture(mcd_path: str, aruco_path: str, crop: bool = True) -> dict |
 
 class GaitDataset(Dataset):
     """
-    Dataset PyTorch con ventanas deslizantes sobre capturas de marcha.
+    PyTorch dataset with sliding windows over gait captures.
 
-    Cada muestra es:
-        x: Tensor [window_size, INPUT_DIM]  (sensores + antropometría)
-        y_pose: Tensor [window_size, OUTPUT_DIM] (posiciones relativas GT)
-        y_disp: Tensor [window_size, 3] (desplazamiento por frame de cadera GT)
+    Each sample is:
+        x: Tensor [window_size, INPUT_DIM]  (sensors + anthropometry)
+        y_pose: Tensor [window_size, OUTPUT_DIM] (GT relative positions)
+        y_disp: Tensor [window_size, 3] (GT per-frame hip displacement)
         anthro: Tensor [3] (femur_len, tibia_len, direction)
     """
 
-    # Valor típico para normalizar longitudes óseas (~rango [0.6, 1.2])
+    # Typical value to normalize bone lengths (~range [0.6, 1.2])
     BONE_NORM = 0.45
 
     def __init__(
@@ -428,8 +428,8 @@ class GaitDataset(Dataset):
 
             anthropometric = np.array(
                 [
-                    cap["femur_length"] / self.BONE_NORM,  # Normalizado ~[0.6, 1.2]
-                    cap["tibia_length"] / self.BONE_NORM,  # Normalizado ~[0.6, 1.2]
+                    cap["femur_length"] / self.BONE_NORM,  # Normalized ~[0.6, 1.2]
+                    cap["tibia_length"] / self.BONE_NORM,  # Normalized ~[0.6, 1.2]
                     cap["hip_width"] / self.BONE_NORM,
                     1.0 if cap["direction"] == "R" else 0.0,
                 ],
@@ -450,7 +450,7 @@ class GaitDataset(Dataset):
                     )
                     all_sensor_chunks.append(sensor[start:end])
 
-        # Estadísticas de normalización (z-score por canal)
+        # Normalization statistics (z-score per channel)
         if stats is not None:
             self.mean = stats["mean"]
             self.std = stats["std"]
@@ -466,7 +466,7 @@ class GaitDataset(Dataset):
         self.normalize = normalize
 
     def get_stats(self) -> dict:
-        """Retorna estadísticas de normalización para val/test."""
+        """Return the normalization statistics for val/test."""
         return {"mean": self.mean, "std": self.std}
 
     def __len__(self):
@@ -474,16 +474,16 @@ class GaitDataset(Dataset):
 
     def __getitem__(self, idx):
         sensor, gt_pose, gt_disp, anthropometric = self.windows[idx]
-        sensor = sensor.copy()  # No modificar el original
+        sensor = sensor.copy()  # Do not modify the original
         gt_pose = gt_pose.copy()
         gt_disp = gt_disp.copy()
 
         if self.normalize:
             sensor = (sensor - self.mean) / self.std
 
-        # ── Data Augmentation (solo entrenamiento) ───────────────────
+        # ── Data augmentation (training only) ────────────────────────
         if self.augment:
-            # 1. Submuestreo temporal (Time Warping)
+            # 1. Temporal subsampling (time warping)
             if random.random() < 0.5:
                 seq_len = len(sensor)
                 crop_ratio = np.random.uniform(0.85, 0.95)
@@ -506,15 +506,15 @@ class GaitDataset(Dataset):
                 gt_disp = interp1d(x_old, gt_disp_crop, axis=0, kind="linear")(
                     x_new
                 ).astype(np.float32)
-                # Escalar desplazamiento por el cambio de velocidad (menos frames originales = mayor velocidad)
+                # Scale the displacement by the speed change (fewer original frames = higher speed)
                 gt_disp = gt_disp * (crop_len / seq_len)
 
-            # 2. Escalado de Amplitud
+            # 2. Amplitude scaling
             if random.random() < 0.5:
                 scale = np.random.uniform(0.9, 1.1)
                 sensor = sensor * scale
 
-            # 3. Frame Dropout (Pérdida de paquetes)
+            # 3. Frame dropout (packet loss)
             if random.random() < 0.5:
                 drop_indices = np.random.choice(
                     len(sensor), size=int(len(sensor) * 0.02), replace=False
@@ -523,15 +523,15 @@ class GaitDataset(Dataset):
                     if idx_drop > 0:
                         sensor[idx_drop] = sensor[idx_drop - 1]
 
-            # 4. Jitter gaussiano (σ = 0.02 de la señal normalizada)
+            # 4. Gaussian jitter (σ = 0.02 of the normalized signal)
             sensor = sensor + np.random.randn(*sensor.shape).astype(np.float32) * 0.02
 
-            # 5. Dropout de canal: enmascarar 1 IMU completa (6 canales) con probabilidad 5%
+            # 5. Channel dropout: mask 1 complete IMU (6 channels) with 5% probability
             if np.random.rand() < 0.05:
                 imu_idx = np.random.randint(0, len(IMU_NAMES))
                 sensor[:, imu_idx * 6 : (imu_idx + 1) * 6] = 0.0
 
-        # Difundir medidas antropométricas a todos los timesteps
+        # Broadcast the anthropometric measurements to all timesteps
         anthro_broadcast = np.tile(anthropometric, (self.window_size, 1))
         x = np.concatenate([sensor, anthro_broadcast], axis=1)
 
@@ -544,17 +544,17 @@ class GaitDataset(Dataset):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  ARQUITECTURA DEL MODELO — TCN LITE MULTITAREA
+#  MODEL ARCHITECTURE — MULTI-TASK TCN LITE
 # ═══════════════════════════════════════════════════════════════════════
 
 
 class TCNBlock(nn.Module):
     """
-    Bloque de Temporal Convolutional Network con convolución 1D dilatada,
-    BatchNorm, GELU, Dropout y conexión residual.
+    Temporal Convolutional Network block with dilated 1D convolution,
+    BatchNorm, GELU, Dropout and a residual connection.
 
-    La convolución dilatada permite un receptive field exponencialmente
-    creciente sin pooling ni recurrencia.
+    The dilated convolution gives an exponentially growing receptive
+    field without pooling or recurrence.
     """
 
     def __init__(
@@ -566,7 +566,7 @@ class TCNBlock(nn.Module):
         dropout: float = 0.2,
     ):
         super().__init__()
-        # Padding "same" para dilatación: (k-1)*d // 2
+        # "Same" padding for dilation: (k-1)*d // 2
         padding = (kernel_size - 1) * dilation // 2
 
         self.conv = nn.Conv1d(
@@ -580,7 +580,7 @@ class TCNBlock(nn.Module):
         self.act = nn.GELU()
         self.dropout = nn.Dropout(dropout)
 
-        # Conexión residual con proyección 1×1 si cambian los canales
+        # Residual connection with a 1×1 projection if the channels change
         self.residual = (
             nn.Conv1d(in_channels, out_channels, 1)
             if in_channels != out_channels
@@ -591,7 +591,7 @@ class TCNBlock(nn.Module):
         # x: [batch, channels, seq_len]
         residual = self.residual(x)
         x = self.conv(x)
-        # Recortar si la salida es ligeramente más larga que la entrada
+        # Crop if the output is slightly longer than the input
         if x.size(2) != residual.size(2):
             x = x[:, :, : residual.size(2)]
         x = self.bn(x)
@@ -601,7 +601,7 @@ class TCNBlock(nn.Module):
 
 
 class PositionalEncoding(nn.Module):
-    """Codificación posicional sinusoidal para secuencias temporales."""
+    """Sinusoidal positional encoding for time sequences."""
 
     def __init__(self, d_model: int, max_len: int = 5000):
         super().__init__()
@@ -622,18 +622,18 @@ class PositionalEncoding(nn.Module):
 
 class GaitMultiTaskNetTTLLite(nn.Module):
     """
-    Red Neuronal Multitarea Ligera (TTL Lite) para Reconstrucción de Marcha.
+    Lightweight multi-task neural network (TTL Lite) for gait reconstruction.
 
-    Utiliza una arquitectura TCN + BiLSTM + Transformer Encoder.
-    Diseñada para capturar dependencias temporales complejas con un bajo número de parámetros.
+    Uses a TCN + BiLSTM + Transformer encoder architecture.
+    Designed to capture complex temporal dependencies with a small number of parameters.
 
-    Arquitectura:
+    Architecture:
       - Input Projection
-      - Backbone TCN: Bloques Conv1D dilatados
-      - BiLSTM: Modelado temporal bidireccional
+      - TCN backbone: dilated Conv1D blocks
+      - BiLSTM: bidirectional temporal modelling
       - Transformer Encoder: Self-Attention
-      - Cabeza 1 (Pose Head): Pose articular 3D [batch, seq_len, 18]
-      - Cabeza 2 (Displacement Head): Desplazamiento pélvico 3D [batch, seq_len, 3]
+      - Head 1 (Pose Head): 3D joint pose [batch, seq_len, 18]
+      - Head 2 (Displacement Head): 3D pelvic displacement [batch, seq_len, 3]
     """
 
     def __init__(
@@ -658,14 +658,14 @@ class GaitMultiTaskNetTTLLite(nn.Module):
         if tcn_dilations is None:
             tcn_dilations = TCN_DILATIONS
 
-        # ── 1. Proyección de entrada ─────────────────────────────────
+        # ── 1. Input projection ──────────────────────────────────────
         self.input_proj = nn.Sequential(
             nn.Linear(input_dim, tcn_channels[0]),
             nn.GELU(),
             nn.LayerNorm(tcn_channels[0]),
         )
 
-        # ── 2. Backbone TCN (convoluciones dilatadas) ────────────────
+        # ── 2. TCN backbone (dilated convolutions) ───────────────────
         self.tcn_blocks = nn.ModuleList()
         channels_in = [tcn_channels[0]] + tcn_channels[:-1]
         for i, (c_in, c_out) in enumerate(zip(channels_in, tcn_channels)):
@@ -709,9 +709,9 @@ class GaitMultiTaskNetTTLLite(nn.Module):
 
         backbone_dim = lstm_hidden * 2
 
-        # ── 5. Cabezas de salida multitarea ──────────────────────────
+        # ── 5. Multi-task output heads ───────────────────────────────
 
-        # Cabeza 1: Pose Relativa [18]
+        # Head 1: relative pose [18]
         self.pose_head = nn.Sequential(
             nn.LayerNorm(backbone_dim),
             nn.Linear(backbone_dim, head_hidden_dim),
@@ -720,7 +720,7 @@ class GaitMultiTaskNetTTLLite(nn.Module):
             nn.Linear(head_hidden_dim, output_dim),
         )
 
-        # Cabeza 2: Desplazamiento pélvico [3]
+        # Head 2: pelvic displacement [3]
         self.disp_head = nn.Sequential(
             nn.LayerNorm(backbone_dim),
             nn.Linear(backbone_dim, head_hidden_dim),
@@ -773,14 +773,14 @@ class GaitMultiTaskNetTTLLite(nn.Module):
 
 
 def print_model_summary(model: nn.Module):
-    """Imprime una tabla detallada de la arquitectura del modelo, capas y parámetros."""
+    """Print a detailed table of the model architecture, layers and parameters."""
     print()
     print("═" * 80)
     print(
-        "  🧠 ARQUITECTURA DE LA RED NEURONAL MULTITAREA (GaitMultiTaskNetTTLLite — TTL Lite)"
+        "  🧠 MULTI-TASK NEURAL NETWORK ARCHITECTURE (GaitMultiTaskNetTTLLite — TTL Lite)"
     )
     print("═" * 80)
-    print(f"  {'Módulo / Bloque':<32} │ {'Tipo de Capa':<24} │ {'Parámetros':>15}")
+    print(f"  {'Module / Block':<32} │ {'Layer type':<24} │ {'Parameters':>15}")
     print("  " + "─" * 76)
 
     total_params = 0
@@ -795,25 +795,25 @@ def print_model_summary(model: nn.Module):
         print(f"  {name:<32} │ {layer_type:<24} │ {p_count:>15,}")
 
     print("  " + "─" * 76)
-    print(f"  {'PARÁMETROS TOTALES ENTRENABLES':<59} │ {trainable_params:>15,}")
+    print(f"  {'TOTAL TRAINABLE PARAMETERS':<59} │ {trainable_params:>15,}")
     print("═" * 80)
     print()
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  FUNCIONES DE PÉRDIDA DEDICADAS Y MULTITAREA PROFUNDA
+#  DEDICATED LOSS FUNCTIONS AND DEEP MULTI-TASK LOSS
 # ═══════════════════════════════════════════════════════════════════════
 
 
 def bone_length_loss(
     predictions: torch.Tensor, anthropometric: torch.Tensor
 ) -> torch.Tensor:
-    """Penaliza desviaciones de las longitudes óseas esperadas."""
+    """Penalize deviations from the expected bone lengths."""
     pred_joints = predictions.view(
         predictions.shape[0], predictions.shape[1], N_JOINTS, N_COORDS
     )
 
-    # Índices: hip_r=0, hip_l=1, knee_r=2, knee_l=3, ankle_r=4, ankle_l=5
+    # Indices: hip_r=0, hip_l=1, knee_r=2, knee_l=3, ankle_r=4, ankle_l=5
     hip_r = pred_joints[:, :, 0, :]
     hip_l = pred_joints[:, :, 1, :]
     knee_r = pred_joints[:, :, 2, :]
@@ -841,7 +841,7 @@ def bone_length_loss(
 
 
 def smoothness_loss(predictions: torch.Tensor) -> torch.Tensor:
-    """Penaliza cambios bruscos (jitter) en las predicciones."""
+    """Penalize abrupt changes (jitter) in the predictions."""
     if predictions.shape[1] < 3:
         return torch.tensor(0.0, device=predictions.device)
 
@@ -867,55 +867,55 @@ def deep_multitask_loss(
     disp_scale: float = DISP_SCALE_FACTOR,
 ) -> tuple[torch.Tensor, dict]:
     """
-    Pérdida profunda multitarea 3D equilibrada con penalización anti-drift.
-    Optimiza simultáneamente:
-      1. Pose articular 3D relativa (rodillas y tobillos)
-      2. Desplazamiento pélvico instantáneo 3D reescalado a dm (X, Y, Z)
-      3. Rapidez escalar instantánea ||Δp|| 3D (cadencia de zancada)
-      4. Trayectoria 3D integrada (cumsum) con énfasis horizontal (X, Y)
-      5. Sesgo medio nulo dentro de la ventana (Anti-Drift de largo plazo)
-      6. Anclaje de altura Z al suelo derivado de los tobillos GT
-      7. Consistencia ósea y suavidad temporal
+    Balanced deep multi-task 3D loss with an anti-drift penalty.
+    Jointly optimizes:
+      1. Relative 3D joint pose (knees and ankles)
+      2. Instantaneous 3D pelvic displacement rescaled to dm (X, Y, Z)
+      3. Instantaneous 3D scalar speed ||Δp|| (stride cadence)
+      4. Integrated 3D trajectory (cumsum) with horizontal emphasis (X, Y)
+      5. Zero mean bias within the window (long-term anti-drift)
+      6. Z-height anchoring to the ground derived from the GT ankles
+      7. Bone consistency and temporal smoothness
     """
-    # 1. Pérdida de pose articular 3D en metros [m^2]
+    # 1. 3D joint pose loss in metres [m^2]
     mse_pose = F.mse_loss(pred_pose, target_pose)
 
-    # 2. Pérdida de desplazamiento pélvico 3D reescalado a decímetros (x10)
-    # Equilibra numéricamente la señal de gradiente (~10^-3) frente a la pose articular
+    # 2. 3D pelvic displacement loss rescaled to decimetres (x10)
+    # Numerically balances the gradient signal (~10^-3) against the joint pose
     p_disp_s = pred_disp * disp_scale
     t_disp_s = target_disp * disp_scale
     mse_disp = F.mse_loss(p_disp_s, t_disp_s)
 
-    # 3. Rapidez escalar instantánea 3D (cadencia de zancada)
+    # 3. Instantaneous 3D scalar speed (stride cadence)
     pred_speed = torch.norm(p_disp_s, dim=-1)
     target_speed = torch.norm(t_disp_s, dim=-1)
     mse_speed = F.mse_loss(pred_speed, target_speed)
 
-    # 4. Trayectoria 3D integrada dentro de la ventana (cumsum)
+    # 4. 3D trajectory integrated within the window (cumsum)
     pred_hip_cumsum = torch.cumsum(pred_disp, dim=1)
     target_hip_cumsum = torch.cumsum(target_disp, dim=1)
     mse_traj = F.mse_loss(pred_hip_cumsum * disp_scale, target_hip_cumsum * disp_scale)
 
-    # 5. Pérdida de sesgo medio acumulado (Anti-Drift): fuerza que la media del error sea 0
+    # 5. Cumulative mean bias loss (anti-drift): forces the mean error to be 0
     disp_mean_err = torch.mean(p_disp_s - t_disp_s, dim=1)  # [B, 3]
     mse_bias = torch.mean(disp_mean_err**2)
 
-    # 6. Anclaje cinemático de altura Z al suelo usando GT de tobillos
+    # 6. Kinematic Z-height anchoring to the ground using the GT ankles
     target_j = target_pose.view(
         target_pose.shape[0], target_pose.shape[1], N_JOINTS, N_COORDS
     )
-    # Índices: hip_r=0, hip_l=1, knee_r=2, knee_l=3, ankle_r=4, ankle_l=5
+    # Indices: hip_r=0, hip_l=1, knee_r=2, knee_l=3, ankle_r=4, ankle_l=5
     target_ankle_r_z = target_j[:, :, 4, 2]
     target_ankle_l_z = target_j[:, :, 5, 2]
 
-    # Altura cinemática de la cadera relativa al pie de apoyo (desde GT)
+    # Kinematic hip height relative to the stance foot (from GT)
     target_h_kin = -torch.minimum(target_ankle_r_z, target_ankle_l_z)
     target_h_kin_rel = target_h_kin - target_h_kin[:, 0:1]
 
     pred_disp_z_cumsum = pred_hip_cumsum[:, :, 2]
     mse_height = F.mse_loss(pred_disp_z_cumsum, target_h_kin_rel)
 
-    # 7. Pérdida global 3D opcional (desactivada por defecto para desacoplar gradientes ruidosos)
+    # 7. Optional global 3D loss (disabled by default to decouple noisy gradients)
     if global_weight > 0.0:
         pred_j = pred_pose.view(
             pred_pose.shape[0], pred_pose.shape[1], N_JOINTS, N_COORDS
@@ -926,7 +926,7 @@ def deep_multitask_loss(
     else:
         mse_global = torch.tensor(0.0, device=pred_pose.device)
 
-    # 8. Restricciones físicas
+    # 8. Physical constraints
     bone = bone_length_loss(pred_pose, anthropometric)
     smooth = smoothness_loss(pred_pose) + smoothness_loss(pred_disp)
 
@@ -957,7 +957,7 @@ def deep_multitask_loss(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  ENTRENAMIENTO MULTITAREA UNIFICADO
+#  UNIFIED MULTI-TASK TRAINING
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -970,7 +970,7 @@ def train_multitask_epoch(
     epoch: int = 0,
     total_epochs: int = 0,
 ) -> dict:
-    """Ejecuta una época de entrenamiento multitarea."""
+    """Run one multi-task training epoch."""
     model.train()
     total_loss = 0.0
     total_pose = 0.0
@@ -1015,14 +1015,14 @@ def train_multitask_epoch(
         total_bias += loss_dict["mse_bias"]
         n_batches += 1
 
-        # Barra de progreso compacta durante la época
+        # Compact progress bar during the epoch
         if total_epochs > 0:
             bar_len = 15
             progress = n_batches / total_batches
             filled = int(bar_len * progress)
             bar = "█" * filled + "░" * (bar_len - filled)
             print(
-                f"\r  Época {epoch:3d}/{total_epochs} │{bar}│ Batch {n_batches}/{total_batches} │ Train: {total_loss/n_batches:.4f}",
+                f"\r  Epoch {epoch:3d}/{total_epochs} │{bar}│ Batch {n_batches}/{total_batches} │ Train: {total_loss/n_batches:.4f}",
                 end="",
                 flush=True,
             )
@@ -1042,7 +1042,7 @@ def train_multitask_epoch(
 
 @torch.no_grad()
 def validate_multitask(model: nn.Module, loader: DataLoader) -> dict:
-    """Ejecuta validación multitarea."""
+    """Run multi-task validation."""
     model.eval()
     total_loss = 0.0
     total_pose = 0.0
@@ -1114,13 +1114,13 @@ def train_multitask_model(
     checkpoint_tag: str = "",
 ) -> dict:
     """
-    Entrena la red multitarea con early stopping y gradientes combinados.
+    Train the multi-task network with early stopping and combined gradients.
     """
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=WEIGHT_DECAY)
     scaler = GradScaler("cuda", enabled=(DEVICE.type == "cuda"))
 
-    # CosineAnnealing con Warm Restarts: reinicia LR cada T_0 épocas
-    # para escapar de mínimos locales
+    # CosineAnnealing with warm restarts: restarts the LR every T_0 epochs
+    # to escape local minima
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer, T_0=30, T_mult=2, eta_min=lr * 0.01
     )
@@ -1144,13 +1144,13 @@ def train_multitask_model(
 
     print()
     print("═" * W)
-    print("  🧠 ENTRENAMIENTO MULTITAREA UNIFICADO (Opción C)")
+    print("  🧠 UNIFIED MULTI-TASK TRAINING (Option C)")
     print("═" * W)
-    print(f"  Parámetros:        {model.count_parameters():,}")
+    print(f"  Parameters:        {model.count_parameters():,}")
     print(f"  Train batches:     {len(train_loader)}")
     print(f"  Val batches:       {len(val_loader)}")
-    print(f"  Épocas máx:        {epochs}")
-    print(f"  Early stopping:    {patience} épocas")
+    print(f"  Max epochs:        {epochs}")
+    print(f"  Early stopping:    {patience} epochs")
     print("═" * W)
     print()
 
@@ -1198,16 +1198,16 @@ def train_multitask_model(
 
         if patience_counter == 0:
             print(
-                f"\r  Época {epoch:3d}/{epochs} │ Train: {tr['total']:.4f} │ Val: {va['total']:.4f} ★ │ LR: {current_lr:.1e} │ {elapsed:.1f}s"
+                f"\r  Epoch {epoch:3d}/{epochs} │ Train: {tr['total']:.4f} │ Val: {va['total']:.4f} ★ │ LR: {current_lr:.1e} │ {elapsed:.1f}s"
             )
         elif epoch % 10 == 0 or epoch == 1 or epoch == epochs:
             print(
-                f"\r  Época {epoch:3d}/{epochs} │ Train: {tr['total']:.4f} │ Val: {va['total']:.4f}   │ LR: {current_lr:.1e} │ {elapsed:.1f}s"
+                f"\r  Epoch {epoch:3d}/{epochs} │ Train: {tr['total']:.4f} │ Val: {va['total']:.4f}   │ LR: {current_lr:.1e} │ {elapsed:.1f}s"
             )
 
         if patience_counter >= patience:
             print(
-                f"\n  ⏹ Early stopping multitarea en época {epoch} (mejor: {best_epoch})"
+                f"\n  ⏹ Multi-task early stopping at epoch {epoch} (best: {best_epoch})"
             )
             break
 
@@ -1215,14 +1215,14 @@ def train_multitask_model(
         model.load_state_dict(best_state)
 
     total_time = time.time() - t_start
-    print(f"\n  ✅ Entrenamiento multitarea completado en {total_time / 60:.1f} min")
-    print(f"  Mejor val loss: {best_val_loss:.6f} (época {best_epoch})")
+    print(f"\n  ✅ Multi-task training completed in {total_time / 60:.1f} min")
+    print(f"  Best val loss: {best_val_loss:.6f} (epoch {best_epoch})")
 
     return history
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  PREDICCIÓN EN SECUENCIA COMPLETA MULTITAREA
+#  FULL-SEQUENCE MULTI-TASK PREDICTION
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -1237,7 +1237,7 @@ def predict_full_sequence_multitask(
     initial_hip: np.ndarray = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Predice posiciones relativas y desplazamiento pélvico con la red multitarea.
+    Predict relative positions and pelvic displacement with the multi-task network.
 
     Returns:
         (pred_pose [N, 18], pred_disp [N, 3], pred_hip_global [N, 3], valid_mask [N])
@@ -1278,21 +1278,21 @@ def predict_full_sequence_multitask(
     pred_pose_sum[valid] /= counts[valid, np.newaxis]
     pred_disp_sum[valid] /= counts[valid, np.newaxis]
 
-    # Integración del desplazamiento pélvico con corrección de anclaje de altura Z al suelo
+    # Integration of the pelvic displacement with Z-height ground-anchoring correction
     if initial_hip is not None and len(initial_hip) > 0:
         base_hip = initial_hip[0].copy()
     else:
         base_hip = np.zeros(3)
 
-    # Anclaje cinemático continuo en Z
+    # Continuous kinematic anchoring in Z
     pred_j_all = pred_pose_sum.reshape(-1, N_JOINTS, N_COORDS)
-    # Índices: hip_r=0, hip_l=1, knee_r=2, knee_l=3, ankle_r=4, ankle_l=5
+    # Indices: hip_r=0, hip_l=1, knee_r=2, knee_l=3, ankle_r=4, ankle_l=5
     ankles_z = np.minimum(pred_j_all[:, 4, 2], pred_j_all[:, 5, 2])
-    kinematic_h_z = -ankles_z  # Altura de cadera respecto al pie de apoyo
+    kinematic_h_z = -ankles_z  # Hip height relative to the stance foot
 
     pred_hip_cumsum = np.cumsum(pred_disp_sum, axis=0) + base_hip
 
-    # Reemplazar Z integrada inercial por el anclaje cinemático de altura + offset de origen
+    # Replace the inertially integrated Z by the kinematic height anchor + origin offset
     pred_hip_global = pred_hip_cumsum.copy()
     pred_hip_global[:, 2] = base_hip[2] + (kinematic_h_z - kinematic_h_z[0])
 
@@ -1300,7 +1300,7 @@ def predict_full_sequence_multitask(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  EVALUACIÓN
+#  EVALUATION
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -1311,17 +1311,17 @@ def compute_mpjpe(
     Mean Per Joint Position Error (MPJPE) en metros.
 
     Args:
-        predictions: [N, 18] posiciones predichas (relativas o globales)
-        targets: [N, 18] posiciones GT
-        percentile: Percentil superior a evaluar (default: 100.0 para todo el conjunto; 95.0 para recortar outliers)
+        predictions: [N, 18] predicted positions (relative or global)
+        targets: [N, 18] GT positions
+        percentile: Upper percentile to evaluate (default: 100.0 for the whole set; 95.0 to trim outliers)
 
     Returns:
-        dict con MPJPE por articulación y promedio general.
+        dict with the MPJPE per joint and the overall mean.
     """
     pred = predictions.reshape(-1, N_JOINTS, N_COORDS)
     tgt = targets.reshape(-1, N_JOINTS, N_COORDS)
 
-    # Error euclidiano por articulación: [N, N_JOINTS]
+    # Euclidean error per joint: [N, N_JOINTS]
     per_joint_error = np.linalg.norm(pred - tgt, axis=-1)
 
     result = {}
@@ -1339,7 +1339,7 @@ def compute_mpjpe(
 def compute_mae_per_joint(
     predictions: np.ndarray, targets: np.ndarray, percentile: float = 100.0
 ) -> dict[str, float]:
-    """MAE (Mean Absolute Error) por articulación en metros."""
+    """MAE (Mean Absolute Error) per joint in metres."""
     pred = predictions.reshape(-1, N_JOINTS, N_COORDS)
     tgt = targets.reshape(-1, N_JOINTS, N_COORDS)
 
@@ -1359,7 +1359,7 @@ def compute_mae_per_joint(
 def compute_rmse_per_joint(
     predictions: np.ndarray, targets: np.ndarray, percentile: float = 100.0
 ) -> dict[str, float]:
-    """RMSE por articulación en metros."""
+    """RMSE per joint in metres."""
     pred = predictions.reshape(-1, N_JOINTS, N_COORDS)
     tgt = targets.reshape(-1, N_JOINTS, N_COORDS)
 
@@ -1379,7 +1379,7 @@ def compute_rmse_per_joint(
 def compute_pearson_per_joint(
     predictions: np.ndarray, targets: np.ndarray
 ) -> dict[str, dict[str, float]]:
-    """Correlación de Pearson por articulación y eje."""
+    """Pearson correlation per joint and axis."""
     pred = predictions.reshape(-1, N_JOINTS, N_COORDS)
     tgt = targets.reshape(-1, N_JOINTS, N_COORDS)
     axis_labels = ["X", "Y", "Z"]
@@ -1403,12 +1403,12 @@ def compute_pearson_per_joint(
 def compute_bland_altman(
     predictions: np.ndarray, targets: np.ndarray
 ) -> dict[str, dict[str, float]]:
-    """Análisis Bland-Altman por eje."""
+    """Bland-Altman analysis per axis."""
     axis_labels = ["X", "Y", "Z"]
     result = {}
 
     for ax_i, ax_name in enumerate(axis_labels):
-        pred_ax = predictions[:, ax_i::3]  # Todas las articulaciones, eje ax_i
+        pred_ax = predictions[:, ax_i::3]  # All joints, axis ax_i
         tgt_ax = targets[:, ax_i::3]
 
         pred_flat = pred_ax.flatten()
@@ -1437,10 +1437,10 @@ def compute_displacement_metrics(
     epe_list: list[float],
 ) -> dict:
     """
-    Métricas de error para el desplazamiento pélvico autónomo (ATE & EPE).
+    Error metrics for the autonomous pelvic displacement (ATE & EPE).
 
     Returns:
-        dict con ATE, EPE, Pearson r por eje y RMSE de velocidad.
+        dict with ATE, EPE, Pearson r per axis and speed RMSE.
     """
     hip_diff = all_pred_hip - all_gt_hip  # [N, 3]
     ate_per_frame = np.linalg.norm(hip_diff, axis=1)  # [N]
@@ -1490,12 +1490,12 @@ def evaluate_on_captures(
     window_size: int = WINDOW_SIZE,
 ) -> dict:
     """
-    Evalúa la red multitarea en una lista de capturas completas.
-    Si se proporcionan file_paths, también genera la comparativa completa
-    con el pipeline analítico para todas las métricas.
+    Evaluate the multi-task network on a list of complete captures.
+    If file_paths are given, also produce the full comparison
+    with the analytical pipeline for every metric.
 
     Returns:
-        dict con todas las métricas de evaluación (NN y Analítico).
+        dict with all the evaluation metrics (NN and analytical).
     """
     all_predictions = []
     all_targets = []
@@ -1505,7 +1505,7 @@ def evaluate_on_captures(
     all_disp_gts = []
     epe_list = []
 
-    # Para pipeline analítico
+    # For the analytical pipeline
     all_ana_predictions = []
     all_ana_hip_preds = []
     all_ana_disp_preds = []
@@ -1531,7 +1531,7 @@ def evaluate_on_captures(
             initial_hip=cap["gt_hip"],
         )
 
-        # Usar solo timesteps con GT y predicción válida
+        # Use only timesteps with valid GT and prediction
         mask = cap["gt_mask"] & valid
         if np.sum(mask) < 10:
             continue
@@ -1555,7 +1555,7 @@ def evaluate_on_captures(
         final_diff = float(np.linalg.norm(hip_pred_valid[-1] - hip_gt_valid[-1]))
         epe_list.append(final_diff)
 
-        # Inferencia Analítica si están disponibles los archivos
+        # Analytical inference if the files are available
         if file_paths is not None and idx < len(file_paths):
             mcd_path, aruco_path = file_paths[idx]
             try:
@@ -1596,10 +1596,10 @@ def evaluate_on_captures(
                 pass
 
     if len(all_predictions) == 0:
-        print(f"  [WARN] No hay predicciones válidas para {label}")
+        print(f"  [WARN] No valid predictions for {label}")
         return {}
 
-    # Concatenar todas las predicciones NN
+    # Concatenate all the NN predictions
     all_pred = np.concatenate(all_predictions, axis=0)
     all_tgt = np.concatenate(all_targets, axis=0)
     all_hip_p = np.concatenate(all_hip_preds, axis=0)
@@ -1607,7 +1607,7 @@ def evaluate_on_captures(
     all_disp_p = np.concatenate(all_disp_preds, axis=0)
     all_disp_g = np.concatenate(all_disp_gts, axis=0)
 
-    # ── Reconstrucción Global 3D (Espacio del Mundo Real) ─────────────
+    # ── Global 3D reconstruction (real-world space) ───────────────────
     all_pred_global = np.zeros_like(all_pred)
     all_tgt_global = np.zeros_like(all_tgt)
     for j in range(N_JOINTS):
@@ -1618,7 +1618,7 @@ def evaluate_on_captures(
             all_tgt[:, j * 3 : (j + 1) * 3] + all_hip_g
         )
 
-    # Métricas NN - Pose Relativa (Pelvis en [0, 0, 0])
+    # NN metrics - relative pose (pelvis at [0, 0, 0])
     mpjpe = compute_mpjpe(all_pred, all_tgt, percentile=100.0)
     mpjpe_p95 = compute_mpjpe(all_pred, all_tgt, percentile=95.0)
     mae = compute_mae_per_joint(all_pred, all_tgt, percentile=100.0)
@@ -1631,7 +1631,7 @@ def evaluate_on_captures(
         all_hip_p, all_hip_g, all_disp_p, all_disp_g, epe_list
     )
 
-    # Métricas NN - Pose Global 3D (Espacio de Cámara / Mundo Real con Odometría)
+    # NN metrics - global 3D pose (camera / real-world space with odometry)
     global_mpjpe_100 = compute_mpjpe(all_pred_global, all_tgt_global, percentile=100.0)
     global_mpjpe_p95 = compute_mpjpe(all_pred_global, all_tgt_global, percentile=95.0)
     global_mae_100 = compute_mae_per_joint(
@@ -1647,7 +1647,7 @@ def evaluate_on_captures(
         all_pred_global, all_tgt_global, percentile=95.0
     )
 
-    # Métricas Analítico (si están disponibles)
+    # Analytical metrics (if available)
     has_ana = (
         len(all_ana_predictions) == len(all_predictions)
         and len(all_ana_predictions) > 0
@@ -1701,99 +1701,99 @@ def evaluate_on_captures(
             global_mae_ana_p95
         ) = global_rmse_ana_100 = global_rmse_ana_p95 = None
 
-    # Imprimir resultados
+    # Print the results
     print()
     print("═" * W)
     title_label = (
-        f"  📊 EVALUACIÓN COMPARATIVA – {label} (NN vs Pipeline Analítico)"
+        f"  📊 COMPARATIVE EVALUATION – {label} (NN vs analytical pipeline)"
         if has_ana
-        else f"  📊 EVALUACIÓN – {label}"
+        else f"  📊 EVALUATION – {label}"
     )
     print(title_label)
     print("═" * W)
 
-    print(f"\n  1) MPJPE Pose Relativa (Pelvis fija en [0, 0, 0])")
+    print(f"\n  1) MPJPE relative pose (pelvis fixed at [0, 0, 0])")
     print(f"  {'─' * 76}")
     if has_ana:
         print(
-            f"     {'Articulación':<14}  {'NN (100%)':>10}  {'NN (P95%)':>10}  {'Analítico(100%)':>16}  {'Analítico(P95%)':>16}  {'Ganador':>9}"
+            f"     {'Joint':<14}  {'NN (100%)':>10}  {'NN (P95%)':>10}  {'Analytical(100%)':>16}  {'Analytical(P95%)':>16}  {'Winner':>9}"
         )
         print(
             f"     {'─' * 14}  {'─' * 10}  {'─' * 10}  {'─' * 16}  {'─' * 16}  {'─' * 9}"
         )
-        win_m = "✅ NN" if mpjpe_p95["mean"] < mpjpe_ana_p95["mean"] else "📐 Analítico"
+        win_m = "✅ NN" if mpjpe_p95["mean"] < mpjpe_ana_p95["mean"] else "📐 Analytical"
         print(
             f"     {'General':<14}  {mpjpe['mean']:>8.4f} m  {mpjpe_p95['mean']:>8.4f} m  {mpjpe_ana['mean']:>14.4f} m  {mpjpe_ana_p95['mean']:>14.4f} m  {win_m:>9}"
         )
         for name in JOINT_NAMES:
-            win_j = "✅ NN" if mpjpe_p95[name] < mpjpe_ana_p95[name] else "📐 Analítico"
+            win_j = "✅ NN" if mpjpe_p95[name] < mpjpe_ana_p95[name] else "📐 Analytical"
             print(
                 f"     {name:<14}  {mpjpe[name]:>8.4f} m  {mpjpe_p95[name]:>8.4f} m  {mpjpe_ana[name]:>14.4f} m  {mpjpe_ana_p95[name]:>14.4f} m  {win_j:>9}"
             )
     else:
         print(
-            f"     MPJPE general:  {mpjpe['mean']:.4f} m  (Percentil 95%: {mpjpe_p95['mean']:.4f} m)"
+            f"     Overall MPJPE:  {mpjpe['mean']:.4f} m  (95th percentile: {mpjpe_p95['mean']:.4f} m)"
         )
         for name in JOINT_NAMES:
             print(
                 f"     {name:<14}  {mpjpe[name]:.4f} m  (P95: {mpjpe_p95[name]:.4f} m)"
             )
 
-    print(f"\n  2) MAE Pose Relativa por articulación")
+    print(f"\n  2) MAE relative pose per joint")
     print(f"  {'─' * 76}")
     if has_ana:
         print(
-            f"     {'Articulación':<14}  {'NN (100%)':>10}  {'NN (P95%)':>10}  {'Analítico(100%)':>16}  {'Analítico(P95%)':>16}  {'Ganador':>9}"
+            f"     {'Joint':<14}  {'NN (100%)':>10}  {'NN (P95%)':>10}  {'Analytical(100%)':>16}  {'Analytical(P95%)':>16}  {'Winner':>9}"
         )
         print(
             f"     {'─' * 14}  {'─' * 10}  {'─' * 10}  {'─' * 16}  {'─' * 16}  {'─' * 9}"
         )
-        win_mae = "✅ NN" if mae_p95["mean"] < mae_ana_p95["mean"] else "📐 Analítico"
+        win_mae = "✅ NN" if mae_p95["mean"] < mae_ana_p95["mean"] else "📐 Analytical"
         print(
             f"     {'General':<14}  {mae['mean']:>8.4f} m  {mae_p95['mean']:>8.4f} m  {mae_ana['mean']:>14.4f} m  {mae_ana_p95['mean']:>14.4f} m  {win_mae:>9}"
         )
         for name in JOINT_NAMES:
-            win_j = "✅ NN" if mae_p95[name] < mae_ana[name] else "📐 Analítico"
+            win_j = "✅ NN" if mae_p95[name] < mae_ana[name] else "📐 Analytical"
             print(
                 f"     {name:<14}  {mae[name]:>8.4f} m  {mae_p95[name]:>8.4f} m  {mae_ana[name]:>14.4f} m  {mae_ana_p95[name]:>14.4f} m  {win_j:>9}"
             )
     else:
         print(
-            f"     MAE general:    {mae['mean']:.4f} m  (Percentil 95%: {mae_p95['mean']:.4f} m)"
+            f"     Overall MAE:    {mae['mean']:.4f} m  (95th percentile: {mae_p95['mean']:.4f} m)"
         )
         for name in JOINT_NAMES:
             print(f"     {name:<14}  {mae[name]:.4f} m  (P95: {mae_p95[name]:.4f} m)")
 
-    print(f"\n  3) RMSE Pose Relativa por articulación")
+    print(f"\n  3) RMSE relative pose per joint")
     print(f"  {'─' * 76}")
     if has_ana:
         print(
-            f"     {'Articulación':<14}  {'NN (100%)':>10}  {'NN (P95%)':>10}  {'Analítico(100%)':>16}  {'Analítico(P95%)':>16}  {'Ganador':>9}"
+            f"     {'Joint':<14}  {'NN (100%)':>10}  {'NN (P95%)':>10}  {'Analytical(100%)':>16}  {'Analytical(P95%)':>16}  {'Winner':>9}"
         )
         print(
             f"     {'─' * 14}  {'─' * 10}  {'─' * 10}  {'─' * 16}  {'─' * 16}  {'─' * 9}"
         )
-        win_r = "✅ NN" if rmse_p95["mean"] < rmse_ana_p95["mean"] else "📐 Analítico"
+        win_r = "✅ NN" if rmse_p95["mean"] < rmse_ana_p95["mean"] else "📐 Analytical"
         print(
             f"     {'General':<14}  {rmse['mean']:>8.4f} m  {rmse_p95['mean']:>8.4f} m  {rmse_ana['mean']:>14.4f} m  {rmse_ana_p95['mean']:>14.4f} m  {win_r:>9}"
         )
         for name in JOINT_NAMES:
-            win_j = "✅ NN" if rmse_p95[name] < rmse_ana[name] else "📐 Analítico"
+            win_j = "✅ NN" if rmse_p95[name] < rmse_ana[name] else "📐 Analytical"
             print(
                 f"     {name:<14}  {rmse[name]:>8.4f} m  {rmse_p95[name]:>8.4f} m  {rmse_ana[name]:>14.4f} m  {rmse_ana_p95[name]:>14.4f} m  {win_j:>9}"
             )
     else:
         print(
-            f"     RMSE general:   {rmse['mean']:.4f} m  (Percentil 95%: {rmse_p95['mean']:.4f} m)"
+            f"     Overall RMSE:   {rmse['mean']:.4f} m  (95th percentile: {rmse_p95['mean']:.4f} m)"
         )
         for name in JOINT_NAMES:
             print(f"     {name:<14}  {rmse[name]:.4f} m  (P95: {rmse_p95[name]:.4f} m)")
 
-    print(f"\n  4) Correlación de Pearson r (Pose por eje)")
+    print(f"\n  4) Pearson correlation r (pose per axis)")
     print(f"  {'─' * 76}")
     if has_ana:
         print(
-            f"     {'Articulación':<14}  {'NN (r_X / r_Y / r_Z)':>26}  {'Analítico (r_X / r_Y / r_Z)':>26}"
+            f"     {'Joint':<14}  {'NN (r_X / r_Y / r_Z)':>26}  {'Analytical (r_X / r_Y / r_Z)':>26}"
         )
         print(f"     {'─' * 14}  {'─' * 26}  {'─' * 26}")
         for name in JOINT_NAMES:
@@ -1811,7 +1811,7 @@ def evaluate_on_captures(
                 f"     {name:<14}  {rx_nn:>7.4f} / {ry_nn:>6.4f} / {rz_nn:>6.4f}  {rx_an:>7.4f} / {ry_an:>6.4f} / {rz_an:>6.4f}"
             )
     else:
-        print(f"     {'Articulación':<12}  {'r_X':>8}  {'r_Y':>8}  {'r_Z':>8}")
+        print(f"     {'Joint':<12}  {'r_X':>8}  {'r_Y':>8}  {'r_Z':>8}")
         print(f"     {'─' * 12}  {'─' * 8}  {'─' * 8}  {'─' * 8}")
         for name in JOINT_NAMES:
             rx = pearson[name]["X"]["r"]
@@ -1819,94 +1819,94 @@ def evaluate_on_captures(
             rz = pearson[name]["Z"]["r"]
             print(f"     {name:<12}  {rx:>8.4f}  {ry:>8.4f}  {rz:>8.4f}")
 
-    print(f"\n  5) Bland-Altman (Sesgo ± LoA por eje)")
+    print(f"\n  5) Bland-Altman (bias ± LoA per axis)")
     print(f"  {'─' * 76}")
     for ax_name in ["X", "Y", "Z"]:
         ba_nn = bland_altman[ax_name]
         if has_ana:
             ba_an = bland_altman_ana[ax_name]
             print(
-                f"     Eje {ax_name}:  NN = {ba_nn['bias']:+.4f}m (LoA [{ba_nn['lower_loa']:+.4f}, {ba_nn['upper_loa']:+.4f}]) │ "
-                f"Analítico = {ba_an['bias']:+.4f}m (LoA [{ba_an['lower_loa']:+.4f}, {ba_an['upper_loa']:+.4f}])"
+                f"     Axis {ax_name}:  NN = {ba_nn['bias']:+.4f}m (LoA [{ba_nn['lower_loa']:+.4f}, {ba_nn['upper_loa']:+.4f}]) │ "
+                f"Analytical = {ba_an['bias']:+.4f}m (LoA [{ba_an['lower_loa']:+.4f}, {ba_an['upper_loa']:+.4f}])"
             )
         else:
             print(
-                f"     Eje {ax_name}:  Sesgo = {ba_nn['bias']:.4f} m,  "
+                f"     Axis {ax_name}:  Bias = {ba_nn['bias']:.4f} m,  "
                 f"LoA = [{ba_nn['lower_loa']:.4f}, {ba_nn['upper_loa']:.4f}] m"
             )
 
-    print(f"\n  6) Desplazamiento Pélvico Autónomo (Cadera Global)")
+    print(f"\n  6) Autonomous pelvic displacement (global hip)")
     print(f"  {'─' * 76}")
     if has_ana:
         d_nn = displacement_metrics
         d_an = displacement_metrics_ana
         print(
-            f"     {'Métrica':<30}  {'NN (m)':>12}  {'Analítico (m)':>15}  {'Ganador':>12}"
+            f"     {'Metric':<30}  {'NN (m)':>12}  {'Analytical (m)':>15}  {'Winner':>12}"
         )
         print(f"     {'─' * 30}  {'─' * 12}  {'─' * 15}  {'─' * 12}")
-        w_ate = "✅ NN" if d_nn["ate_mean"] < d_an["ate_mean"] else "📐 Analítico"
+        w_ate = "✅ NN" if d_nn["ate_mean"] < d_an["ate_mean"] else "📐 Analytical"
         print(
             f"     {'ATE Global':<30}  {d_nn['ate_mean']:>12.4f}  {d_an['ate_mean']:>15.4f}  {w_ate:>12}"
         )
-        w_x = "✅ NN" if d_nn["ate_x"] < d_an["ate_x"] else "📐 Analítico"
+        w_x = "✅ NN" if d_nn["ate_x"] < d_an["ate_x"] else "📐 Analytical"
         print(
-            f"     {'ATE Eje X (Avance frontal)':<30}  {d_nn['ate_x']:>12.4f}  {d_an['ate_x']:>15.4f}  {w_x:>12}"
+            f"     {'ATE X axis (forward progression)':<30}  {d_nn['ate_x']:>12.4f}  {d_an['ate_x']:>15.4f}  {w_x:>12}"
         )
-        w_y = "✅ NN" if d_nn["ate_y"] < d_an["ate_y"] else "📐 Analítico"
+        w_y = "✅ NN" if d_nn["ate_y"] < d_an["ate_y"] else "📐 Analytical"
         print(
-            f"     {'ATE Eje Y (Desplazamiento lat.)':<30}  {d_nn['ate_y']:>12.4f}  {d_an['ate_y']:>15.4f}  {w_y:>12}"
+            f"     {'ATE Y axis (lateral displ.)':<30}  {d_nn['ate_y']:>12.4f}  {d_an['ate_y']:>15.4f}  {w_y:>12}"
         )
-        w_z = "✅ NN" if d_nn["ate_z"] < d_an["ate_z"] else "📐 Analítico"
+        w_z = "✅ NN" if d_nn["ate_z"] < d_an["ate_z"] else "📐 Analytical"
         print(
-            f"     {'ATE Eje Z (Oscilación vert.)':<30}  {d_nn['ate_z']:>12.4f}  {d_an['ate_z']:>15.4f}  {w_z:>12}"
+            f"     {'ATE Z axis (vertical osc.)':<30}  {d_nn['ate_z']:>12.4f}  {d_an['ate_z']:>15.4f}  {w_z:>12}"
         )
-        w_epe = "✅ NN" if d_nn["epe_mean"] < d_an["epe_mean"] else "📐 Analítico"
+        w_epe = "✅ NN" if d_nn["epe_mean"] < d_an["epe_mean"] else "📐 Analytical"
         print(
-            f"     {'EPE (Deriva Final)':<30}  {d_nn['epe_mean']:>12.4f}  {d_an['epe_mean']:>15.4f}  {w_epe:>12}"
+            f"     {'EPE (final drift)':<30}  {d_nn['epe_mean']:>12.4f}  {d_an['epe_mean']:>15.4f}  {w_epe:>12}"
         )
         w_rx = (
-            "✅ NN" if d_nn["pearson"]["X"] > d_an["pearson"]["X"] else "📐 Analítico"
+            "✅ NN" if d_nn["pearson"]["X"] > d_an["pearson"]["X"] else "📐 Analytical"
         )
         print(
-            f"     {'Correlación r (Avance X)':<30}  {d_nn['pearson']['X']:>12.4f}  {d_an['pearson']['X']:>15.4f}  {w_rx:>12}"
+            f"     {'Correlation r (forward X)':<30}  {d_nn['pearson']['X']:>12.4f}  {d_an['pearson']['X']:>15.4f}  {w_rx:>12}"
         )
         w_rz = (
-            "✅ NN" if d_nn["pearson"]["Z"] > d_an["pearson"]["Z"] else "📐 Analítico"
+            "✅ NN" if d_nn["pearson"]["Z"] > d_an["pearson"]["Z"] else "📐 Analytical"
         )
         print(
-            f"     {'Correlación r (Oscilación Z)':<30}  {d_nn['pearson']['Z']:>12.4f}  {d_an['pearson']['Z']:>15.4f}  {w_rz:>12}"
+            f"     {'Correlation r (oscillation Z)':<30}  {d_nn['pearson']['Z']:>12.4f}  {d_an['pearson']['Z']:>15.4f}  {w_rz:>12}"
         )
     else:
         print(
             f"     ATE (Absolute Trajectory Error): {displacement_metrics['ate_mean'] * 100:.2f} cm ± {displacement_metrics['ate_std'] * 100:.2f} cm"
         )
         print(
-            f"     ATE Eje X (Avance frontal):      {displacement_metrics['ate_x'] * 100:.2f} cm"
+            f"     ATE X axis (forward progression): {displacement_metrics['ate_x'] * 100:.2f} cm"
         )
         print(
-            f"     ATE Eje Y (Desplazamiento lat.): {displacement_metrics['ate_y'] * 100:.2f} cm"
+            f"     ATE Y axis (lateral displ.):      {displacement_metrics['ate_y'] * 100:.2f} cm"
         )
         print(
-            f"     ATE Eje Z (Oscilación vertical): {displacement_metrics['ate_z'] * 100:.2f} cm"
+            f"     ATE Z axis (vertical oscillation): {displacement_metrics['ate_z'] * 100:.2f} cm"
         )
         print(
-            f"     EPE (Deriva Final al terminar):   {displacement_metrics['epe_mean'] * 100:.2f} cm (Máx: {displacement_metrics['epe_max'] * 100:.2f} cm)"
+            f"     EPE (final drift at the end):     {displacement_metrics['epe_mean'] * 100:.2f} cm (Max: {displacement_metrics['epe_max'] * 100:.2f} cm)"
         )
         print(
-            f"     Correlación r (Avance Eje X):    {displacement_metrics['pearson']['X']:.4f}"
+            f"     Correlation r (forward X axis):   {displacement_metrics['pearson']['X']:.4f}"
         )
         print(
-            f"     Correlación r (Oscilación Eje Z): {displacement_metrics['pearson']['Z']:.4f}"
+            f"     Correlation r (oscillation Z axis): {displacement_metrics['pearson']['Z']:.4f}"
         )
 
-    # ── 7) MPJPE Global 3D (Espacio del Mundo Real) ───────────────────
+    # ── 7) Global 3D MPJPE (real-world space) ─────────────────────────
     print(
-        f"\n  7) MPJPE Global 3D (Espacio del Mundo Real / Con Desplazamiento Acumulado)"
+        f"\n  7) Global 3D MPJPE (real-world space / with accumulated displacement)"
     )
     print(f"  {'─' * 76}")
     if has_ana:
         print(
-            f"     {'Articulación':<14}  {'NN (100%)':>10}  {'NN (P95%)':>10}  {'Analítico(100%)':>16}  {'Analítico(P95%)':>16}  {'Ganador':>9}"
+            f"     {'Joint':<14}  {'NN (100%)':>10}  {'NN (P95%)':>10}  {'Analytical(100%)':>16}  {'Analytical(P95%)':>16}  {'Winner':>9}"
         )
         print(
             f"     {'─' * 14}  {'─' * 10}  {'─' * 10}  {'─' * 16}  {'─' * 16}  {'─' * 9}"
@@ -1914,7 +1914,7 @@ def evaluate_on_captures(
         win_gm = (
             "✅ NN"
             if global_mpjpe_p95["mean"] < global_mpjpe_ana_p95["mean"]
-            else "📐 Analítico"
+            else "📐 Analytical"
         )
         print(
             f"     {'General':<14}  {global_mpjpe_100['mean']:>8.4f} m  {global_mpjpe_p95['mean']:>8.4f} m  {global_mpjpe_ana_100['mean']:>14.4f} m  {global_mpjpe_ana_p95['mean']:>14.4f} m  {win_gm:>9}"
@@ -1923,38 +1923,38 @@ def evaluate_on_captures(
             win_gj = (
                 "✅ NN"
                 if global_mpjpe_p95[name] < global_mpjpe_ana_p95[name]
-                else "📐 Analítico"
+                else "📐 Analytical"
             )
             print(
                 f"     {name:<14}  {global_mpjpe_100[name]:>8.4f} m  {global_mpjpe_p95[name]:>8.4f} m  {global_mpjpe_ana_100[name]:>14.4f} m  {global_mpjpe_ana_p95[name]:>14.4f} m  {win_gj:>9}"
             )
     else:
         print(
-            f"     MPJPE Global general:  {global_mpjpe_100['mean']:.4f} m  (Percentil 95%: {global_mpjpe_p95['mean']:.4f} m)"
+            f"     Overall global MPJPE:  {global_mpjpe_100['mean']:.4f} m  (95th percentile: {global_mpjpe_p95['mean']:.4f} m)"
         )
         for name in JOINT_NAMES:
             print(
                 f"     {name:<14}  {global_mpjpe_100[name]:.4f} m  (P95: {global_mpjpe_p95[name]:.4f} m)"
             )
 
-    # ── 8) MAE y RMSE Global 3D ───────────────────────────────────────
-    print(f"\n  8) MAE y RMSE Global 3D (Espacio del Mundo Real)")
+    # ── 8) Global 3D MAE and RMSE ─────────────────────────────────────
+    print(f"\n  8) Global 3D MAE and RMSE (real-world space)")
     print(f"  {'─' * 76}")
     if has_ana:
         print(
-            f"     MAE Global General:   NN = {global_mae_100['mean']:.4f} m (P95: {global_mae_p95['mean']:.4f} m) │ "
-            f"Analítico = {global_mae_ana_100['mean']:.4f} m (P95: {global_mae_ana_p95['mean']:.4f} m)"
+            f"     Overall global MAE:   NN = {global_mae_100['mean']:.4f} m (P95: {global_mae_p95['mean']:.4f} m) │ "
+            f"Analytical = {global_mae_ana_100['mean']:.4f} m (P95: {global_mae_ana_p95['mean']:.4f} m)"
         )
         print(
-            f"     RMSE Global General:  NN = {global_rmse_100['mean']:.4f} m (P95: {global_rmse_p95['mean']:.4f} m) │ "
-            f"Analítico = {global_rmse_ana_100['mean']:.4f} m (P95: {global_rmse_ana_p95['mean']:.4f} m)"
+            f"     Overall global RMSE:  NN = {global_rmse_100['mean']:.4f} m (P95: {global_rmse_p95['mean']:.4f} m) │ "
+            f"Analytical = {global_rmse_ana_100['mean']:.4f} m (P95: {global_rmse_ana_p95['mean']:.4f} m)"
         )
     else:
         print(
-            f"     MAE Global general:   {global_mae_100['mean']:.4f} m  (Percentil 95%: {global_mae_p95['mean']:.4f} m)"
+            f"     Overall global MAE:   {global_mae_100['mean']:.4f} m  (95th percentile: {global_mae_p95['mean']:.4f} m)"
         )
         print(
-            f"     RMSE Global general:  {global_rmse_100['mean']:.4f} m  (Percentil 95%: {global_rmse_p95['mean']:.4f} m)"
+            f"     Overall global RMSE:  {global_rmse_100['mean']:.4f} m  (95th percentile: {global_rmse_p95['mean']:.4f} m)"
         )
 
     print("═" * W)
@@ -2000,7 +2000,7 @@ def evaluate_on_captures(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  COMPARACIÓN CON PIPELINE ANALÍTICO
+#  COMPARISON WITH THE ANALYTICAL PIPELINE
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -2012,15 +2012,15 @@ def compare_with_analytical(
     window_size: int = WINDOW_SIZE,
 ) -> dict:
     """
-    Compara las predicciones de la red multitarea con la reconstrucción
-    analítica existente (process_all.py) usando ArUco como ground truth.
+    Compare the multi-task network predictions with the existing analytical
+    reconstruction (process_all.py), using ArUco as ground truth.
 
     Returns:
-        dict con métricas comparativas.
+        dict with comparative metrics.
     """
     print()
     print("═" * W)
-    print("  🔀 COMPARACIÓN: Red Neuronal Multitarea vs Pipeline Analítico")
+    print("  🔀 COMPARISON: multi-task neural network vs analytical pipeline")
     print("═" * W)
 
     nn_errors = []
@@ -2030,7 +2030,7 @@ def compare_with_analytical(
     for cap, (mcd_path, aruco_path) in zip(test_captures, test_file_paths):
         label = f"{Path(mcd_path).parent.name}/{Path(mcd_path).name}"
 
-        # ── Predicción NN Multitarea ─────────────────────────────────
+        # ── Multi-task NN prediction ─────────────────────────────────
         anthropometric = np.array(
             [
                 cap["femur_length"] / GaitDataset.BONE_NORM,
@@ -2053,39 +2053,39 @@ def compare_with_analytical(
         )
         nn_pred = nn_pred_pose
 
-        # ── Reconstrucción analítica ─────────────────────────────────
+        # ── Analytical reconstruction ────────────────────────────────
         try:
             analytical_result = process_files((mcd_path, aruco_path), use_3d=False)
             if analytical_result is None:
                 continue
         except Exception as e:
-            print(f"  [SKIP] Analítico falló para {label}: {e}")
+            print(f"  [SKIP] Analytical failed for {label}: {e}")
             continue
 
         _, _, reconstruction, aruco_processed, homogeneous_data, _, _ = (
             analytical_result
         )
 
-        # Convertir reconstrucción analítica a posiciones relativas a cadera
+        # Convert the analytical reconstruction to hip-relative positions
         hip_center = (reconstruction["hip_r"] + reconstruction["hip_l"]) / 2.0
 
         analytical_relative = {}
         for j_name in JOINT_NAMES:
             analytical_relative[j_name] = reconstruction[j_name] - hip_center
 
-        # Comparar en los timestamps válidos
+        # Compare at the valid timestamps
         mask = cap["gt_mask"] & nn_valid
         n_valid = int(np.sum(mask))
         if n_valid < 10:
             continue
 
-        # GT relativo
+        # Relative GT
         gt_rel = cap["gt_relative"][mask]
 
-        # NN relativo
+        # Relative NN
         nn_rel = nn_pred[mask]
 
-        # Analítico relativo (sincronizado con offset first_valid)
+        # Relative analytical (synchronized with the first_valid offset)
         first_valid = cap.get("first_valid", 0)
         cap_len = len(cap["sensor_data"])
         analytical_rel = np.zeros_like(nn_rel)
@@ -2108,12 +2108,12 @@ def compare_with_analytical(
         print(
             f"  {label:<30}  "
             f"NN: {nn_mpjpe:.4f} m  │  "
-            f"Analítico: {analytical_mpjpe:.4f} m  │  "
-            f"{'✅ NN' if nn_mpjpe < analytical_mpjpe else '📐 Analítico'}"
+            f"Analytical: {analytical_mpjpe:.4f} m  │  "
+            f"{'✅ NN' if nn_mpjpe < analytical_mpjpe else '📐 Analytical'}"
         )
 
     if len(nn_errors) == 0:
-        print("  [WARN] No se pudieron comparar capturas")
+        print("  [WARN] No captures could be compared")
         return {}
 
     nn_errors = np.array(nn_errors)
@@ -2122,21 +2122,21 @@ def compare_with_analytical(
     print()
     print(f"  {'─' * 50}")
     print(
-        f"  MPJPE promedio NN:         {np.mean(nn_errors):.4f} "
+        f"  Mean NN MPJPE:             {np.mean(nn_errors):.4f} "
         f"± {np.std(nn_errors):.4f} m"
     )
     print(
-        f"  MPJPE promedio Analítico:  {np.mean(analytical_errors):.4f} "
+        f"  Mean analytical MPJPE:     {np.mean(analytical_errors):.4f} "
         f"± {np.std(analytical_errors):.4f} m"
     )
     nn_wins = int(np.sum(nn_errors < analytical_errors))
-    print(f"  NN gana en:                {nn_wins}/{len(nn_errors)} capturas")
+    print(f"  NN wins in:                {nn_wins}/{len(nn_errors)} captures")
     improvement = (
         (np.mean(analytical_errors) - np.mean(nn_errors))
         / np.mean(analytical_errors)
         * 100
     )
-    print(f"  Mejora relativa:           {improvement:+.1f}%")
+    print(f"  Relative improvement:      {improvement:+.1f}%")
     print("═" * W)
 
     return {
@@ -2150,19 +2150,19 @@ def compare_with_analytical(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  VISUALIZACIÓN
+#  VISUALIZATION
 # ═══════════════════════════════════════════════════════════════════════
 
 
 def plot_training_curves(history: dict, save_dir: Path):
-    """Genera gráficas de las curvas de entrenamiento."""
+    """Plot the training curves."""
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
     # Loss total
     axes[0].plot(history["train_loss"], label="Train", color="#4472C4", alpha=0.8)
     axes[0].plot(history["val_loss"], label="Validation", color="#ED7D31", alpha=0.8)
-    axes[0].set_title("Loss Total", fontweight="bold")
-    axes[0].set_xlabel("Época")
+    axes[0].set_title("Total loss", fontweight="bold")
+    axes[0].set_xlabel("Epoch")
     axes[0].set_ylabel("Loss")
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
@@ -2176,8 +2176,8 @@ def plot_training_curves(history: dict, save_dir: Path):
             history[pose_tr_key], label="Train Pose", color="#4472C4", alpha=0.8
         )
         axes[1].plot(history[pose_va_key], label="Val Pose", color="#ED7D31", alpha=0.8)
-    axes[1].set_title("MSE Pose Articular", fontweight="bold")
-    axes[1].set_xlabel("Época")
+    axes[1].set_title("Joint pose MSE", fontweight="bold")
+    axes[1].set_xlabel("Epoch")
     axes[1].set_ylabel("MSE")
     axes[1].legend()
     axes[1].grid(True, alpha=0.3)
@@ -2186,13 +2186,13 @@ def plot_training_curves(history: dict, save_dir: Path):
     # Learning rate
     axes[2].plot(history["lr"], color="#70AD47")
     axes[2].set_title("Learning Rate", fontweight="bold")
-    axes[2].set_xlabel("Época")
+    axes[2].set_xlabel("Epoch")
     axes[2].set_ylabel("LR")
     axes[2].grid(True, alpha=0.3)
     axes[2].set_yscale("log")
 
     plt.suptitle(
-        "Curvas de Entrenamiento – Red Neuronal de Reconstrucción",
+        "Training curves – reconstruction neural network",
         fontsize=14,
         fontweight="bold",
     )
@@ -2203,7 +2203,7 @@ def plot_training_curves(history: dict, save_dir: Path):
 
 
 def plot_mpjpe_comparison(eval_metrics: dict, save_dir: Path):
-    """Boxplot de MPJPE por articulación."""
+    """Boxplot of the MPJPE per joint."""
     if "per_capture_mpjpe" not in eval_metrics:
         return
 
@@ -2230,18 +2230,18 @@ def plot_mpjpe_comparison(eval_metrics: dict, save_dir: Path):
         patch.set_facecolor(color)
         patch.set_alpha(0.7)
 
-    ax.set_title("MPJPE por Articulación (Test Set)", fontsize=14, fontweight="bold")
+    ax.set_title("MPJPE per joint (test set)", fontsize=14, fontweight="bold")
     ax.set_ylabel("MPJPE (m)")
     ax.grid(True, alpha=0.3, axis="y")
 
-    # Línea de media global
+    # Global mean line
     global_mean = eval_metrics["mpjpe"]["mean"]
     ax.axhline(
         global_mean,
         color="red",
         linestyle="--",
         alpha=0.7,
-        label=f"Media global: {global_mean:.4f} m",
+        label=f"Global mean: {global_mean:.4f} m",
     )
     ax.legend()
 
@@ -2258,7 +2258,7 @@ def plot_trajectory_comparison(
     save_dir: Path,
     capture_label: str = "sample",
 ):
-    """Gráfica de trayectorias comparativas (NN vs GT) en el plano sagital."""
+    """Plot comparative trajectories (NN vs GT) in the sagittal plane."""
     mask = capture["gt_mask"] & nn_valid
     if np.sum(mask) < 10:
         return
@@ -2269,7 +2269,7 @@ def plot_trajectory_comparison(
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.suptitle(
-        f"Trayectorias Relativas – {capture_label}",
+        f"Relative trajectories – {capture_label}",
         fontsize=14,
         fontweight="bold",
     )
@@ -2290,8 +2290,8 @@ def plot_trajectory_comparison(
         )
 
         ax.set_title(j_name.replace("_", " ").title(), fontweight="bold")
-        ax.set_xlabel("Tiempo (s)")
-        ax.set_ylabel("Posición relativa (m)")
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Relative position (m)")
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
 
@@ -2306,13 +2306,13 @@ def plot_trajectory_comparison(
 
 
 def plot_nn_vs_analytical(comparison: dict, save_dir: Path):
-    """Gráfica de barras comparando NN vs Analítico."""
+    """Bar chart comparing NN vs analytical."""
     if not comparison or len(comparison.get("nn_errors", [])) == 0:
         return
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
-    # Barras por captura
+    # Bars per capture
     n = len(comparison["nn_errors"])
     x = np.arange(n)
     width = 0.35
@@ -2321,7 +2321,7 @@ def plot_nn_vs_analytical(comparison: dict, save_dir: Path):
         x - width / 2,
         comparison["nn_errors"],
         width,
-        label="Red Neuronal",
+        label="Neural network",
         color="#4472C4",
         alpha=0.8,
     )
@@ -2329,13 +2329,13 @@ def plot_nn_vs_analytical(comparison: dict, save_dir: Path):
         x + width / 2,
         comparison["analytical_errors"],
         width,
-        label="Analítico",
+        label="Analytical",
         color="#ED7D31",
         alpha=0.8,
     )
-    axes[0].set_xlabel("Captura")
+    axes[0].set_xlabel("Capture")
     axes[0].set_ylabel("MPJPE (m)")
-    axes[0].set_title("MPJPE por Captura", fontweight="bold")
+    axes[0].set_title("MPJPE per capture", fontweight="bold")
     axes[0].legend()
     axes[0].grid(True, alpha=0.3, axis="y")
     if n <= 20:
@@ -2347,13 +2347,13 @@ def plot_nn_vs_analytical(comparison: dict, save_dir: Path):
             fontsize=7,
         )
 
-    # Resumen
-    methods = ["Red Neuronal", "Analítico"]
+    # Summary
+    methods = ["Neural network", "Analytical"]
     means = [comparison["nn_mean"], comparison["analytical_mean"]]
     colors = ["#4472C4", "#ED7D31"]
     bars = axes[1].bar(methods, means, color=colors, alpha=0.8, width=0.5)
-    axes[1].set_ylabel("MPJPE medio (m)")
-    axes[1].set_title("Comparación Global", fontweight="bold")
+    axes[1].set_ylabel("Mean MPJPE (m)")
+    axes[1].set_title("Global comparison", fontweight="bold")
     axes[1].grid(True, alpha=0.3, axis="y")
     for bar, val in zip(bars, means):
         axes[1].text(
@@ -2365,7 +2365,7 @@ def plot_nn_vs_analytical(comparison: dict, save_dir: Path):
         )
 
     plt.suptitle(
-        "Comparación: Red Neuronal vs Pipeline Analítico",
+        "Comparison: neural network vs analytical pipeline",
         fontsize=14,
         fontweight="bold",
     )
@@ -2376,7 +2376,7 @@ def plot_nn_vs_analytical(comparison: dict, save_dir: Path):
 
 
 def plot_bland_altman_nn(eval_metrics: dict, save_dir: Path):
-    """Gráficas Bland-Altman para la red neuronal."""
+    """Bland-Altman plots for the neural network."""
     if "bland_altman" not in eval_metrics:
         return
 
@@ -2388,7 +2388,7 @@ def plot_bland_altman_nn(eval_metrics: dict, save_dir: Path):
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))
     fig.suptitle(
-        "Bland-Altman: Red Neuronal vs Ground Truth",
+        "Bland-Altman: neural network vs ground truth",
         fontsize=14,
         fontweight="bold",
     )
@@ -2407,7 +2407,7 @@ def plot_bland_altman_nn(eval_metrics: dict, save_dir: Path):
             color="red",
             linestyle="-",
             linewidth=1.5,
-            label=f"Sesgo: {ba_info['bias']:.4f} m",
+            label=f"Bias: {ba_info['bias']:.4f} m",
         )
         axes[ax_i].axhline(
             ba_info["upper_loa"],
@@ -2423,9 +2423,9 @@ def plot_bland_altman_nn(eval_metrics: dict, save_dir: Path):
             linewidth=1,
             label=f"-1.96σ: {ba_info['lower_loa']:.4f} m",
         )
-        axes[ax_i].set_xlabel(f"Media {ax_name} (m)")
-        axes[ax_i].set_ylabel(f"Diferencia {ax_name} (m)")
-        axes[ax_i].set_title(f"Eje {ax_name}")
+        axes[ax_i].set_xlabel(f"Mean {ax_name} (m)")
+        axes[ax_i].set_ylabel(f"Difference {ax_name} (m)")
+        axes[ax_i].set_title(f"Axis {ax_name}")
         axes[ax_i].legend(fontsize=7)
         axes[ax_i].grid(True, alpha=0.3)
 
@@ -2436,7 +2436,7 @@ def plot_bland_altman_nn(eval_metrics: dict, save_dir: Path):
 
 
 def plot_error_heatmap(eval_metrics: dict, save_dir: Path):
-    """Heatmap de RMSE por articulación y eje."""
+    """Heatmap of the RMSE per joint and axis."""
     if "all_predictions" not in eval_metrics:
         return
 
@@ -2444,7 +2444,7 @@ def plot_error_heatmap(eval_metrics: dict, save_dir: Path):
     tgt = eval_metrics["all_targets"].reshape(-1, N_JOINTS, N_COORDS)
     axis_labels = ["X", "Y", "Z"]
 
-    # Matriz de RMSE: [n_joints, 3]
+    # RMSE matrix: [n_joints, 3]
     rmse_matrix = np.zeros((N_JOINTS, N_COORDS))
     for j in range(N_JOINTS):
         for ax in range(N_COORDS):
@@ -2457,9 +2457,9 @@ def plot_error_heatmap(eval_metrics: dict, save_dir: Path):
     ax.set_xticklabels(axis_labels)
     ax.set_yticks(range(N_JOINTS))
     ax.set_yticklabels([n.replace("_", " ").title() for n in JOINT_NAMES])
-    ax.set_xlabel("Eje")
-    ax.set_ylabel("Articulación")
-    ax.set_title("RMSE por Articulación y Eje (m)", fontweight="bold")
+    ax.set_xlabel("Axis")
+    ax.set_ylabel("Joint")
+    ax.set_title("RMSE per joint and axis (m)", fontweight="bold")
 
     for i in range(N_JOINTS):
         for j in range(N_COORDS):
@@ -2488,29 +2488,29 @@ def create_3d_animation(
     nn_valid: np.ndarray,
     save_path: Path,
     nn_hip_global: np.ndarray = None,
-    title: str = "Reconstrucción 3D: Red Neuronal vs ArUco Ground Truth",
+    title: str = "3D reconstruction: neural network vs ArUco ground truth",
     step_subsample: int = 2,
     interactive: bool = False,
 ):
     """
-    Crea y guarda/muestra una animación 3D comparativa cuadro por cuadro
-    del esqueleto tren inferior reconstruido por la Red Neuronal vs ArUco (GT).
+    Create and save/show a frame-by-frame comparative 3D animation
+    of the lower-limb skeleton reconstructed by the neural network vs ArUco (GT).
 
     Args:
-        capture: dict de la captura con gt_relative, gt_hip, gt_mask, timestamps
-        nn_pred: np.ndarray [N, 18] posiciones relativas predichas por la red
-        nn_valid: np.ndarray [N] bool con validez de predicción
-        save_path: Path de salida para el archivo de animación (.gif)
-        nn_hip_global: np.ndarray [N, 3] cadera global autónoma predicha por la red
-        title: Título de la gráfica
-        step_subsample: Submuestreo de cuadros (default: 2, 50fps si fs=100Hz)
-        interactive: Si es True, muestra la animación interactiva con plt.show()
+        capture: capture dict with gt_relative, gt_hip, gt_mask, timestamps
+        nn_pred: np.ndarray [N, 18] relative positions predicted by the network
+        nn_valid: np.ndarray [N] bool with prediction validity
+        save_path: Output path for the animation file (.gif)
+        nn_hip_global: np.ndarray [N, 3] autonomous global hip predicted by the network
+        title: Plot title
+        step_subsample: Frame subsampling (default: 2, 50fps if fs=100Hz)
+        interactive: If True, show the interactive animation with plt.show()
     """
     from matplotlib.animation import FuncAnimation, PillowWriter
 
     mask = capture["gt_mask"] & nn_valid
     if np.sum(mask) < 10:
-        print("  [WARN] Insuficientes muestras válidas para animación 3D")
+        print("  [WARN] Not enough valid samples for the 3D animation")
         return
 
     valid_indices = np.where(mask)[0][::step_subsample]
@@ -2523,8 +2523,8 @@ def create_3d_animation(
     pred_j = pred_rel.reshape(n_frames, N_JOINTS, N_COORDS)
     gt_j = gt_rel.reshape(n_frames, N_JOINTS, N_COORDS)
 
-    # 6 articulaciones: ankle_r, knee_r, hip_r, hip_l, knee_l, ankle_l
-    # Índices: hip_r=0, hip_l=1, knee_r=2, knee_l=3, ankle_r=4, ankle_l=5
+    # 6 joints: ankle_r, knee_r, hip_r, hip_l, knee_l, ankle_l
+    # Indices: hip_r=0, hip_l=1, knee_r=2, knee_l=3, ankle_r=4, ankle_l=5
     nn_skeleton = np.zeros((n_frames, 6, 3))
     gt_skeleton = np.zeros((n_frames, 6, 3))
 
@@ -2534,7 +2534,7 @@ def create_3d_animation(
             nn_hip_global[valid_indices[f]] if nn_hip_global is not None else hip_gt
         )
 
-        # NN — usar hip_r/hip_l predichos directamente
+        # NN — use the predicted hip_r/hip_l directly
         nn_hip_r = pred_j[f, 0] + hip_nn
         nn_hip_l = pred_j[f, 1] + hip_nn
         nn_knee_r = pred_j[f, 2] + hip_nn
@@ -2546,7 +2546,7 @@ def create_3d_animation(
             [nn_ankle_r, nn_knee_r, nn_hip_r, nn_hip_l, nn_knee_l, nn_ankle_l]
         )
 
-        # GT (ArUco) — usar hip_r/hip_l estimados del GT
+        # GT (ArUco) — use the hip_r/hip_l estimated from the GT
         gt_hip_r = gt_j[f, 0] + hip_gt
         gt_hip_l = gt_j[f, 1] + hip_gt
         gt_knee_r = gt_j[f, 2] + hip_gt
@@ -2566,7 +2566,7 @@ def create_3d_animation(
         [],
         [],
         "o-",
-        label="Red Neuronal (NN)",
+        label="Neural network (NN)",
         color="#1F77B4",
         linewidth=3,
         markersize=6,
@@ -2587,9 +2587,9 @@ def create_3d_animation(
         0.05, 0.95, "", transform=ax.transAxes, fontsize=11, fontweight="bold"
     )
 
-    ax.set_xlabel("X - Desplazamiento (m)", labelpad=10)
+    ax.set_xlabel("X - Displacement (m)", labelpad=10)
     ax.set_ylabel("Y - Lateral (m)", labelpad=10)
-    ax.set_zlabel("Z - Altura (m)", labelpad=10)
+    ax.set_zlabel("Z - Height (m)", labelpad=10)
     ax.set_title(title, fontsize=13, fontweight="bold", pad=15)
     ax.legend(loc="upper right", fontsize=10)
     ax.grid(True, alpha=0.3)
@@ -2613,7 +2613,7 @@ def create_3d_animation(
         ax.set_zlim(-0.1, 1.1)
 
         t_sec = frame * step_subsample * 0.01
-        time_text.set_text(f"Cuadro: {frame+1}/{n_frames}  │  Tiempo: {t_sec:.2f} s")
+        time_text.set_text(f"Frame: {frame+1}/{n_frames}  │  Time: {t_sec:.2f} s")
         return line_nn, line_gt, time_text
 
     anim = FuncAnimation(
@@ -2621,19 +2621,19 @@ def create_3d_animation(
     )
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"  🎬 Renderizando y guardando animación 3D GIF en {save_path}...")
+    print(f"  🎬 Rendering and saving the 3D GIF animation to {save_path}...")
     try:
         writer = PillowWriter(fps=25)
         anim.save(str(save_path), writer=writer)
-        print(f"  ✓ Animación 3D guardada exitosamente: {save_path}")
+        print(f"  ✓ 3D animation saved successfully: {save_path}")
     except Exception as e:
-        print(f"  [ERROR] No se pudo guardar el archivo GIF: {e}")
+        print(f"  [ERROR] Could not save the GIF file: {e}")
 
     if interactive:
         try:
             plt.show()
         except Exception as e:
-            print(f"  [INFO] No se pudo abrir ventana interactiva: {e}")
+            print(f"  [INFO] Could not open an interactive window: {e}")
 
     plt.close(fig)
 
@@ -2645,17 +2645,17 @@ def create_3d_animation(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Reconstrucción de marcha con redes neuronales"
+        description="Gait reconstruction with neural networks"
     )
     parser.add_argument(
         "--eval-only",
         action="store_true",
-        help="Solo evaluación con modelo guardado",
+        help="Evaluation only, with the saved model",
     )
     parser.add_argument(
         "--animate",
         action="store_true",
-        help="Generar animación 3D comparativa (NN vs ArUco)",
+        help="Generate a comparative 3D animation (NN vs ArUco)",
     )
     parser.add_argument("--epochs", type=int, default=EPOCHS)
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
@@ -2666,79 +2666,79 @@ def main():
         "--dataset",
         type=str,
         default=str(DATASET_PATH),
-        help="Ruta al dataset",
+        help="Path to the dataset",
     )
     parser.add_argument(
         "--n-val-subjects",
         type=int,
         default=3,
-        help="Número de sujetos para el conjunto de validación (default: 3)",
+        help="Number of subjects in the validation set (default: 3)",
     )
     parser.add_argument(
         "--n-test-subjects",
         type=int,
         default=5,
-        help="Número de sujetos para el conjunto de test (default: 5)",
+        help="Number of subjects in the test set (default: 5)",
     )
     parser.add_argument(
         "--val-subjects",
         nargs="+",
         type=str,
         default=None,
-        help="Lista de IDs de sujetos específicos para validación (ej: 25 26 27)",
+        help="List of specific subject IDs for validation (e.g. 25 26 27)",
     )
     parser.add_argument(
         "--test-subjects",
         nargs="+",
         type=str,
         default=None,
-        help="Lista de IDs de sujetos específicos para test (ej: 28 29 30)",
+        help="List of specific subject IDs for test (e.g. 28 29 30)",
     )
     parser.add_argument(
         "--patience",
         type=int,
         default=PATIENCE,
-        help="Paciencia del entrenamiento (default: 10)",
+        help="Training patience (default: 10)",
     )
     parser.add_argument(
         "--checkpoint",
         type=str,
         default=None,
-        help="Ruta al checkpoint del modelo",
+        help="Path to the model checkpoint",
     )
     parser.add_argument(
         "--shuffle-subjects",
         action="store_true",
         default=True,
-        help="Mezclar aleatoriamente los sujetos antes de dividir en train/val/test (default: True)",
+        help="Randomly shuffle the subjects before splitting into train/val/test (default: True)",
     )
     parser.add_argument(
         "--no-shuffle-subjects",
         dest="shuffle_subjects",
         action="store_false",
-        help="Desactivar la mezcla aleatoria de sujetos (usar orden numérico por ID)",
+        help="Disable the random subject shuffle (use numeric order by ID)",
     )
     parser.add_argument(
         "--seed",
         type=int,
         default=42,
-        help="Semilla aleatoria para la mezcla de sujetos y reproducibilidad (default: 42)",
+        help="Random seed for the subject shuffle and reproducibility (default: 42)",
     )
     parser.add_argument(
         "--checkpoint-tag",
         type=str,
         default="",
-        help="Tag para identificar el checkpoint (default: '')",
+        help="Tag to identify the checkpoint (default: '')",
     )
     parser.add_argument(
         "--data-split",
         type=str,
         default=str(DATA_SPLIT_PATH),
-        help="Ruta al archivo JSON con la división de sujetos (default: data_split.json)",
+        help="Path to the JSON file with the subject split (default: data_split.json)",
     )
     args = parser.parse_args()
 
-    # Fijar semillas para reproducibilidad
+    # Set the seeds for reproducibility
     if args.seed is not None:
         random.seed(args.seed)
         np.random.seed(args.seed)
@@ -2752,7 +2752,7 @@ def main():
 
     print()
     print("═" * W)
-    print("  🦿 RECONSTRUCCIÓN DE MARCHA CON REDES NEURONALES")
+    print("  🦿 GAIT RECONSTRUCTION WITH NEURAL NETWORKS")
     print("═" * W)
     print(f"  Dataset:          {dataset_path}")
     print(f"  Device:           {DEVICE}")
@@ -2762,17 +2762,17 @@ def main():
     print(f"  Window stride:    {args.window_stride}")
     print("═" * W)
 
-    # ── 1. Descubrir capturas ────────────────────────────────────────
-    print("\n  📂 Descubriendo capturas...")
+    # ── 1. Discover captures ─────────────────────────────────────────
+    print("\n  📂 Discovering captures...")
     captures_info = discover_captures(dataset_path)
-    print(f"  Encontradas: {len(captures_info)} pares de archivos")
+    print(f"  Found: {len(captures_info)} file pairs")
 
     if len(captures_info) == 0:
-        print("  [ERROR] No se encontraron archivos en el dataset")
+        print("  [ERROR] No files found in the dataset")
         sys.exit(1)
 
-    # ── 2. Preparar datos ────────────────────────────────────────────
-    print("\n  ⚙️  Cargando y preparando capturas...")
+    # ── 2. Prepare data ──────────────────────────────────────────────
+    print("\n  ⚙️  Loading and preparing captures...")
     subjects_data: dict[str, list[dict]] = {}
     file_paths_by_subject: dict[str, list[tuple[str, str]]] = {}
 
@@ -2797,22 +2797,22 @@ def main():
         filled = int(bar_len * progress)
         bar = "█" * filled + "░" * (bar_len - filled)
         print(
-            f"\r  Cargando capturas │{bar}│ {idx}/{total_captures} ({progress*100:.1f}%) │ ✓ {success_count} │ ✗ {failed_count}",
+            f"\r  Loading captures │{bar}│ {idx}/{total_captures} ({progress*100:.1f}%) │ ✓ {success_count} │ ✗ {failed_count}",
             end="",
             flush=True,
         )
 
-    print()  # Nueva línea al terminar la barra de progreso
-    print(f"\n  ✓ Capturas cargadas correctamente: {success_count}/{total_captures}")
-    print(f"  ✗ Capturas fallidas/omitidas:     {failed_count}/{total_captures}")
+    print()  # New line at the end of the progress bar
+    print(f"\n  ✓ Captures loaded successfully: {success_count}/{total_captures}")
+    print(f"  ✗ Captures failed/skipped:      {failed_count}/{total_captures}")
 
     all_subjects = sorted(subjects_data.keys(), key=lambda x: int(x))
 
     if len(all_subjects) < 3:
-        print("  [ERROR] Se necesitan al menos 3 sujetos para train/val/test")
+        print("  [ERROR] At least 3 subjects are needed for train/val/test")
         sys.exit(1)
 
-    # ── 3. Dividir por sujeto (Configurable + data_split.json + Shuffle) ─
+    # ── 3. Split by subject (configurable + data_split.json + shuffle) ──
     split_path = Path(args.data_split) if args.data_split else None
     if (
         split_path
@@ -2837,10 +2837,10 @@ def main():
             for s in split_info.get("test_subjects", [])
             if str(s) in subjects_data
         ]
-        print(f"\n  📊 División de datos cargada desde {split_path}:")
-        print(f"    Train ({len(train_subjects)} sujetos):      {train_subjects}")
-        print(f"    Validación ({len(val_subjects)} sujetos): {val_subjects}")
-        print(f"    Test ({len(test_subjects)} sujetos):       {test_subjects}")
+        print(f"\n  📊 Data split loaded from {split_path}:")
+        print(f"    Train ({len(train_subjects)} subjects):      {train_subjects}")
+        print(f"    Validation ({len(val_subjects)} subjects): {val_subjects}")
+        print(f"    Test ({len(test_subjects)} subjects):       {test_subjects}")
     else:
         subjects_pool = list(all_subjects)
         if args.shuffle_subjects:
@@ -2864,11 +2864,11 @@ def main():
         train_subjects = [s for s in remaining_subjects if s not in val_subjects]
 
         print(
-            f"\n  📊 División de datos (Shuffle={args.shuffle_subjects}, Seed={args.seed}):"
+            f"\n  📊 Data split (Shuffle={args.shuffle_subjects}, Seed={args.seed}):"
         )
-        print(f"    Train ({len(train_subjects)} sujetos):      {train_subjects}")
-        print(f"    Validación ({len(val_subjects)} sujetos): {val_subjects}")
-        print(f"    Test ({len(test_subjects)} sujetos):       {test_subjects}")
+        print(f"    Train ({len(train_subjects)} subjects):      {train_subjects}")
+        print(f"    Validation ({len(val_subjects)} subjects): {val_subjects}")
+        print(f"    Test ({len(test_subjects)} subjects):       {test_subjects}")
 
     train_captures = []
     for s in train_subjects:
@@ -2884,12 +2884,12 @@ def main():
         test_captures.extend(subjects_data[s])
         test_file_paths.extend(file_paths_by_subject[s])
 
-    print(f"    Train capturas:  {len(train_captures)}")
-    print(f"    Val capturas:    {len(val_captures)}")
-    print(f"    Test capturas:   {len(test_captures)}")
+    print(f"    Train captures:  {len(train_captures)}")
+    print(f"    Val captures:    {len(val_captures)}")
+    print(f"    Test captures:   {len(test_captures)}")
 
-    # ── 4. Crear Datasets ────────────────────────────────────────────
-    print("\n  📦 Creando datasets con ventanas deslizantes...")
+    # ── 4. Create datasets ───────────────────────────────────────────
+    print("\n  📦 Creating datasets with sliding windows...")
 
     train_dataset = GaitDataset(
         train_captures,
@@ -2902,15 +2902,15 @@ def main():
     val_dataset = GaitDataset(
         val_captures,
         window_size=args.window_size,
-        stride=args.window_size,  # Sin solapamiento para validación
+        stride=args.window_size,  # No overlap for validation
         stats=norm_stats,
     )
 
-    print(f"    Train ventanas:  {len(train_dataset)}")
-    print(f"    Val ventanas:    {len(val_dataset)}")
+    print(f"    Train windows:   {len(train_dataset)}")
+    print(f"    Val windows:     {len(val_dataset)}")
 
     if len(train_dataset) == 0:
-        print("  [ERROR] No se generaron ventanas de entrenamiento")
+        print("  [ERROR] No training windows were generated")
         sys.exit(1)
 
     train_loader = DataLoader(
@@ -2929,7 +2929,7 @@ def main():
         pin_memory=True,
     )
 
-    # ── 5. Crear modelo multitarea unificado ─────────────────────────
+    # ── 5. Create the unified multi-task model ───────────────────────
     model = GaitMultiTaskNetTTLLite(
         input_dim=INPUT_DIM,
         output_dim=OUTPUT_DIM,
@@ -2937,7 +2937,7 @@ def main():
 
     print_model_summary(model)
 
-    # ── 6. Entrenar o cargar checkpoint ──────────────────────────────
+    # ── 6. Train or load the checkpoint ──────────────────────────────
     checkpoint_path = (
         Path(args.checkpoint)
         if args.checkpoint
@@ -2950,10 +2950,10 @@ def main():
 
     if args.eval_only:
         if not checkpoint_path.exists():
-            print(f"  [ERROR] No se encontró checkpoint en {checkpoint_path}")
+            print(f"  [ERROR] No checkpoint found at {checkpoint_path}")
             sys.exit(1)
         print(
-            f"\n  📥 Cargando GaitMultiTaskNetTTLLite (TTL Lite) desde {checkpoint_path}"
+            f"\n  📥 Loading GaitMultiTaskNetTTLLite (TTL Lite) from {checkpoint_path}"
         )
         checkpoint = torch.load(
             checkpoint_path, map_location=DEVICE, weights_only=False
@@ -2977,7 +2977,7 @@ def main():
         with open(CHECKPOINT_DIR / "norm_stats.json", "w") as f:
             json.dump(stats_to_save, f)
 
-        # Guardar norm_stats y la configuración real dentro del checkpoint .pt (evita bugs de float64)
+        # Save norm_stats and the actual configuration inside the .pt checkpoint (avoids float64 bugs)
         ckpt_path = (
             CHECKPOINT_DIR / f"best_ttl_lite_{args.checkpoint_tag}.pt"
             if args.checkpoint_tag
@@ -3011,13 +3011,13 @@ def main():
             }
             torch.save(ckpt, ckpt_path)
 
-        # Guardar historial
+        # Save the history
         history_to_save = {k: [float(v) for v in vals] for k, vals in history.items()}
         with open(RESULTS_DIR / "training_history.json", "w") as f:
             json.dump(history_to_save, f, indent=2)
 
-    # ── 7. Evaluación en test set ────────────────────────────────────
-    print("\n  📊 Evaluando en test set...")
+    # ── 7. Evaluation on the test set ────────────────────────────────
+    print("\n  📊 Evaluating on the test set...")
     eval_metrics = evaluate_on_captures(
         model,
         test_captures,
@@ -3027,8 +3027,8 @@ def main():
         window_size=args.window_size,
     )
 
-    # ── 8. Comparación con pipeline analítico ────────────────────────
-    print("\n  🔀 Comparando con pipeline analítico...")
+    # ── 8. Comparison with the analytical pipeline ───────────────────
+    print("\n  🔀 Comparing with the analytical pipeline...")
     comparison = compare_with_analytical(
         model,
         test_captures,
@@ -3039,7 +3039,7 @@ def main():
 
 
 def plot_displacement_analysis(eval_metrics: dict, save_dir: Path):
-    """Grafica el análisis de error del desplazamiento pélvico autónomo."""
+    """Plot the error analysis of the autonomous pelvic displacement."""
     if "displacement" not in eval_metrics or len(eval_metrics["all_hip_preds"]) == 0:
         return
 
@@ -3049,45 +3049,45 @@ def plot_displacement_analysis(eval_metrics: dict, save_dir: Path):
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    # Ejemplo: Primera captura del conjunto de test
+    # Example: first capture of the test set
     hip_p_cap = all_hip_p[0]
     hip_g_cap = all_hip_g[0]
     time_axis = np.arange(len(hip_p_cap)) * 0.01  # 100 Hz
 
-    # Subplot 1: Eje X (Avance frontal)
+    # Subplot 1: X axis (forward progression)
     axes[0].plot(
         time_axis, hip_g_cap[:, 0], "k-", linewidth=2, label="ArUco Ground Truth"
     )
     axes[0].plot(
-        time_axis, hip_p_cap[:, 0], "r--", linewidth=2, label="Red Neuronal (Autónoma)"
+        time_axis, hip_p_cap[:, 0], "r--", linewidth=2, label="Neural network (autonomous)"
     )
-    axes[0].set_xlabel("Tiempo (s)")
-    axes[0].set_ylabel("Posición X (m)")
+    axes[0].set_xlabel("Time (s)")
+    axes[0].set_ylabel("X position (m)")
     axes[0].set_title(
-        f"Desplazamiento Frontal (Eje X) — ATE: {disp['ate_x']*100:.2f} cm",
+        f"Forward displacement (X axis) — ATE: {disp['ate_x']*100:.2f} cm",
         fontweight="bold",
     )
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
 
-    # Subplot 2: Eje Z (Oscilación vertical)
+    # Subplot 2: Z axis (vertical oscillation)
     axes[1].plot(
         time_axis, hip_g_cap[:, 2], "k-", linewidth=2, label="ArUco Ground Truth"
     )
     axes[1].plot(
-        time_axis, hip_p_cap[:, 2], "b--", linewidth=2, label="Red Neuronal (Autónoma)"
+        time_axis, hip_p_cap[:, 2], "b--", linewidth=2, label="Neural network (autonomous)"
     )
-    axes[1].set_xlabel("Tiempo (s)")
-    axes[1].set_ylabel("Posición Z (m)")
+    axes[1].set_xlabel("Time (s)")
+    axes[1].set_ylabel("Z position (m)")
     axes[1].set_title(
-        f"Oscilación Vertical (Eje Z) — ATE: {disp['ate_z']*100:.2f} cm",
+        f"Vertical oscillation (Z axis) — ATE: {disp['ate_z']*100:.2f} cm",
         fontweight="bold",
     )
     axes[1].legend()
     axes[1].grid(True, alpha=0.3)
 
     plt.suptitle(
-        f"Análisis de Desplazamiento Pélvico — ATE Global: {disp['ate_mean']*100:.2f} cm │ EPE Deriva Final: {disp['epe_mean']*100:.2f} cm",
+        f"Pelvic displacement analysis — global ATE: {disp['ate_mean']*100:.2f} cm │ final EPE drift: {disp['epe_mean']*100:.2f} cm",
         fontsize=13,
         fontweight="bold",
     )
@@ -3096,8 +3096,8 @@ def plot_displacement_analysis(eval_metrics: dict, save_dir: Path):
     plt.close(fig)
     print(f"  ✓ {save_dir / 'displacement_analysis.png'}")
 
-    # ── 9. Gráficas de evaluación ────────────────────────────────────
-    print("\n  🎨 Generando gráficas de evaluación...")
+    # ── 9. Evaluation plots ──────────────────────────────────────────
+    print("\n  🎨 Generating evaluation plots...")
     if eval_metrics:
         plot_mpjpe_comparison(eval_metrics, RESULTS_DIR)
         plot_bland_altman_nn(eval_metrics, RESULTS_DIR)
@@ -3107,7 +3107,7 @@ def plot_displacement_analysis(eval_metrics: dict, save_dir: Path):
     if comparison:
         plot_nn_vs_analytical(comparison, RESULTS_DIR)
 
-    # Trayectorias y animación 3D de ejemplo (primera captura del test set)
+    # Example trajectories and 3D animation (first capture of the test set)
     if len(test_captures) > 0:
         sample_subject = test_subjects[0]
         cap = test_captures[0]
@@ -3147,11 +3147,11 @@ def plot_displacement_analysis(eval_metrics: dict, save_dir: Path):
             nn_valid,
             anim_gif_path,
             nn_hip_global=pred_hip_global,
-            title=f"Reconstrucción 3D Autónoma (Red Neuronal vs ArUco) – Sujeto {sample_subject}",
+            title=f"Autonomous 3D reconstruction (neural network vs ArUco) – Subject {sample_subject}",
             interactive=args.animate,
         )
 
-    # ── 10. Guardar métricas finales ─────────────────────────────────
+    # ── 10. Save final metrics ───────────────────────────────────────
     final_metrics = {}
     if eval_metrics:
         final_metrics["mpjpe"] = eval_metrics.get("mpjpe", {})
@@ -3171,19 +3171,19 @@ def plot_displacement_analysis(eval_metrics: dict, save_dir: Path):
     with open(RESULTS_DIR / "final_metrics.json", "w") as f:
         json.dump(final_metrics, f, indent=2, default=str)
 
-    # ── Resumen final ────────────────────────────────────────────────
+    # ── Final summary ────────────────────────────────────────────────
     print()
     print("═" * W)
-    print("  ✅ PROCESAMIENTO COMPLETO")
+    print("  ✅ PROCESSING COMPLETE")
     print("═" * W)
-    print(f"  Resultados guardados en:   {RESULTS_DIR.resolve()}")
-    print(f"  Modelo guardado en:        {CHECKPOINT_DIR.resolve()}")
+    print(f"  Results saved to:          {RESULTS_DIR.resolve()}")
+    print(f"  Model saved to:            {CHECKPOINT_DIR.resolve()}")
     if eval_metrics:
         print(f"  MPJPE (test):              " f"{eval_metrics['mpjpe']['mean']:.4f} m")
     if comparison:
         print(f"  MPJPE NN:                  {comparison['nn_mean']:.4f} m")
-        print(f"  MPJPE Analítico:           " f"{comparison['analytical_mean']:.4f} m")
-        print(f"  Mejora:                    " f"{comparison['improvement_pct']:+.1f}%")
+        print(f"  Analytical MPJPE:          " f"{comparison['analytical_mean']:.4f} m")
+        print(f"  Improvement:               " f"{comparison['improvement_pct']:+.1f}%")
     print("═" * W)
 
 

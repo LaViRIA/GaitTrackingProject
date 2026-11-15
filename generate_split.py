@@ -6,7 +6,7 @@ import os
 def generate_split(total_subjects=30, train_size=20, val_size=5, test_size=5):
     if train_size + val_size + test_size != total_subjects:
         print(
-            f"Error: Suma de sujetos ({train_size+val_size+test_size}) no coincide con el total ({total_subjects})"
+            f"Error: the sum of subjects ({train_size+val_size+test_size}) does not match the total ({total_subjects})"
         )
         return
 
@@ -26,13 +26,13 @@ def generate_split(total_subjects=30, train_size=20, val_size=5, test_size=5):
     with open("data_split.json", "w") as f:
         json.dump(split, f, indent=4)
 
-    print(f"Split generado en data_split.json:")
+    print(f"Split generated in data_split.json:")
     print(f"Train: {train_subjects}")
     print(f"Val:   {val_subjects}")
     print(f"Test:  {test_subjects}")
 
 
 if __name__ == "__main__":
-    # Puedes cambiar la semilla para reproducibilidad
+    # Change the seed to obtain a different reproducible split
     random.seed(32345)
     generate_split()

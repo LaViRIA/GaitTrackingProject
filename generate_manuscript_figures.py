@@ -1,26 +1,24 @@
 """
 generate_manuscript_figures.py
 ==============================
-Generates publication-quality figures for the 'Resultados y Discusión' /
-'Results and Discussion' section of the manuscript (MDPI Sensors / IEEE style).
-
-Supports both Spanish ('es') and English ('en') language rendering.
+Generates publication-quality figures for the 'Results and Discussion'
+section of the manuscript (MDPI Sensors / IEEE style).
 Caches evaluated trial data in 'v2_manuscript/figures/eval_cache.pkl' for
 instant regeneration of plots.
 
 Figures produced in v2_manuscript/figures/:
-  1. fig2_temporal_error_comparison_{lang}.png / .pdf
+  1. fig2_temporal_error_comparison_en.png / .pdf
      Unified 3-panel figure: Best, Representative (Median), and Worst case error curves.
-  2. fig3_statistical_error_distribution_{lang}.png / .pdf
+  2. fig3_statistical_error_distribution_en.png / .pdf
      (a) Boxplots of MPJPE across joints (Analytical vs TCN Lite across all 20 test captures).
      (b) Empirical Cumulative Distribution Function (ECDF) of global 3D position error.
-  3. fig4_trajectory_and_drift_analysis_{lang}.png / .pdf
+  3. fig4_trajectory_and_drift_analysis_en.png / .pdf
      (a) Ground-plane (X-Z) pelvic trajectory for representative capture.
      (b) Cumulative drift (ATE) as a function of walked distance.
-  4. fig5_biomechanical_agreement_{lang}.png / .pdf
+  4. fig5_biomechanical_agreement_en.png / .pdf
      (a) Knee flexion-extension range of motion across gait cycle.
      (b) Bland-Altman agreement plot across X axis for TCN Lite vs Ground Truth.
-  5. fig6_3d_joint_trajectories_{lang}.png / .pdf
+  5. fig6_3d_joint_trajectories_en.png / .pdf
      3D joint trajectories (ArUco GT vs TCN Lite) and intermediate gait pose reconstruction.
 """
 
@@ -77,7 +75,7 @@ COLOR_TTL = "#B279A2"  # TTL Lite mauve
 COLOR_TRANS = "#F1A340"  # Transformer sand
 COLOR_STATIC = "#4393C3"  # Static PoseNet blue
 
-DATASET_PATH = Path("/home/badajoz/Documents/DataSet")
+DATASET_PATH = Path("DataSet")  # default: DataSet/ in the repository root (override with --dataset)
 OUTPUT_DIR = Path("v2_manuscript/figures")
 CACHE_FILE = OUTPUT_DIR / "eval_cache.pkl"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -167,7 +165,7 @@ def run_pipeline_evaluation(use_cache: bool = True):
         ckpt_tcn["model_state_dict"] if "model_state_dict" in ckpt_tcn else ckpt_tcn
     )
 
-    # norm_stats del propio checkpoint; el .json compartido puede venir de otro entrenamiento
+    # norm_stats from the checkpoint itself; the shared .json may come from another training run
     if ckpt_tcn.get("norm_stats") is not None:
         norm_stats_tcn = dict(ckpt_tcn["norm_stats"])
     else:
@@ -391,7 +389,7 @@ def run_pipeline_evaluation(use_cache: bool = True):
     return trials_data, all_ana_arr, all_tcn_arr, all_static_arr
 
 
-def plot_fig2_temporal_error(trials_data, lang: str = "en"):
+def plot_fig2_temporal_error(trials_data):
     """
     Figure 2: Unified 3-panel error over time comparison (Best, Representative, Worst cases).
     """
@@ -400,34 +398,19 @@ def plot_fig2_temporal_error(trials_data, lang: str = "en"):
     median_trial = sorted_trials[len(sorted_trials) // 2]
     worst_trial = sorted_trials[-1]
 
-    if lang == "es":
-        cases = [
-            ("Mejor caso", best_trial, "a"),
-            ("Caso representativo (mediana)", median_trial, "b"),
-            ("Peor caso", worst_trial, "c"),
-        ]
-        label_ana = "Método Analítico"
-        label_tcn = "TCN Lite (propuesto)"
-        label_excess = "Exceso error analítico"
-        xlabel = "Tiempo (s)"
-        ylabel = "Error de Posición Global MPJPE (m)"
-        subj_lbl = "Sujeto"
-        trial_lbl = "Ensayo"
-        ana_tag = "Analítico"
-    else:
-        cases = [
-            ("Best Case", best_trial, "a"),
-            ("Representative Case (Median)", median_trial, "b"),
-            ("Worst Case", worst_trial, "c"),
-        ]
-        label_ana = "Analytical Pipeline"
-        label_tcn = "TCN Lite (Proposed)"
-        label_excess = "Analytical excess error"
-        xlabel = "Time (s)"
-        ylabel = "Global MPJPE Position Error (m)"
-        subj_lbl = "Subject"
-        trial_lbl = "Trial"
-        ana_tag = "Analytical"
+    cases = [
+        ("Best Case", best_trial, "a"),
+        ("Representative Case (Median)", median_trial, "b"),
+        ("Worst Case", worst_trial, "c"),
+    ]
+    label_ana = "Analytical Pipeline"
+    label_tcn = "TCN Lite (Proposed)"
+    label_excess = "Analytical excess error"
+    xlabel = "Time (s)"
+    ylabel = "Global MPJPE Position Error (m)"
+    subj_lbl = "Subject"
+    trial_lbl = "Trial"
+    ana_tag = "Analytical"
 
     fig, axes = plt.subplots(1, 3, figsize=(14.5, 4.2), sharey=True)
 
@@ -503,17 +486,17 @@ def plot_fig2_temporal_error(trials_data, lang: str = "en"):
     axes[0].legend(loc="upper right", framealpha=0.9, fontsize=8)
 
     plt.tight_layout()
-    suffix = f"_{lang}" if lang != "es" else ""
+    suffix = "_en"
     out_png = OUTPUT_DIR / f"fig2_temporal_error_comparison{suffix}.png"
     out_pdf = OUTPUT_DIR / f"fig2_temporal_error_comparison{suffix}.pdf"
     fig.savefig(out_png, dpi=300, bbox_inches="tight")
     fig.savefig(out_pdf, bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ Saved Figure 2 [{lang}]: {out_png}")
+    print(f"  ✓ Saved Figure 2: {out_png}")
 
 
 def plot_fig3_statistical_distribution(
-    trials_data, all_ana, all_tcn, all_static, lang: str = "en"
+    trials_data, all_ana, all_tcn, all_static
 ):
     """
     Figure 3: Cross-subject statistical distribution across holdout trials:
@@ -527,56 +510,31 @@ def plot_fig3_statistical_distribution(
     p95_tcn = float(np.percentile(all_tcn, 95))
     p95_ana = float(np.percentile(all_ana, 95))
 
-    if lang == "es":
-        joint_names = [
-            "Cadera D",
-            "Cadera I",
-            "Rodilla D",
-            "Rodilla I",
-            "Tobillo D",
-            "Tobillo I",
-            "General",
-        ]
-        ylabel_box = "MPJPE por Articulación (m)"
-        title_box = "(a) Dispersión del Error por Articulación (20 Ensayos de Test)"
-        lbl_ana_box = "Método Analítico (línea base)"
-        lbl_tcn_box = "TCN Lite (propuesto)"
-        lbl_mean_box = "Media"
+    joint_names = [
+        "Right Hip",
+        "Left Hip",
+        "Right Knee",
+        "Left Knee",
+        "Right Ankle",
+        "Left Ankle",
+        "Overall",
+    ]
+    ylabel_box = "MPJPE by Joint (m)"
+    title_box = "(a) Error Dispersion by Joint (20 Held-Out Test Trials)"
+    lbl_ana_box = "Analytical Pipeline (Baseline)"
+    lbl_tcn_box = "TCN Lite (Proposed)"
+    lbl_mean_box = "Mean"
 
-        title_ecdf = "(b) Función de Distribución Acumulada (ECDF, >7000 tramas)"
-        xlabel_ecdf = "Error Global de Posición 3D (m)"
-        ylabel_ecdf = "Probabilidad Acumulada $P(X \\leq x)$"
-        lbl_tcn_ecdf = "TCN Lite (propuesto)"
-        lbl_ana_ecdf = "Método Analítico"
-        lbl_static_ecdf = "Red Estática (P+P)"
-        p95_tcn_text = f"P95 TCN\n{p95_tcn*100:.1f} cm".replace(".", ",")
-        p95_ana_text = f"P95 Analítico\n{p95_ana*100:.1f} cm".replace(".", ",")
-    else:
-        joint_names = [
-            "Right Hip",
-            "Left Hip",
-            "Right Knee",
-            "Left Knee",
-            "Right Ankle",
-            "Left Ankle",
-            "Overall",
-        ]
-        ylabel_box = "MPJPE by Joint (m)"
-        title_box = "(a) Error Dispersion by Joint (20 Held-Out Test Trials)"
-        lbl_ana_box = "Analytical Pipeline (Baseline)"
-        lbl_tcn_box = "TCN Lite (Proposed)"
-        lbl_mean_box = "Mean"
-
-        title_ecdf = (
-            "(b) Empirical Cumulative Distribution Function (ECDF, >7,000 frames)"
-        )
-        xlabel_ecdf = "Global 3D Position Error (m)"
-        ylabel_ecdf = "Cumulative Probability $P(X \\leq x)$"
-        lbl_tcn_ecdf = "TCN Lite (Proposed)"
-        lbl_ana_ecdf = "Analytical Pipeline"
-        lbl_static_ecdf = "Static Network (P+P)"
-        p95_tcn_text = f"P95 TCN\n{p95_tcn*100:.1f} cm"
-        p95_ana_text = f"P95 Analytical\n{p95_ana*100:.1f} cm"
+    title_ecdf = (
+        "(b) Empirical Cumulative Distribution Function (ECDF, >7,000 frames)"
+    )
+    xlabel_ecdf = "Global 3D Position Error (m)"
+    ylabel_ecdf = "Cumulative Probability $P(X \\leq x)$"
+    lbl_tcn_ecdf = "TCN Lite (Proposed)"
+    lbl_ana_ecdf = "Analytical Pipeline"
+    lbl_static_ecdf = "Static Network (P+P)"
+    p95_tcn_text = f"P95 TCN\n{p95_tcn*100:.1f} cm"
+    p95_ana_text = f"P95 Analytical\n{p95_ana*100:.1f} cm"
 
     ana_per_joint = [[] for _ in range(7)]
     tcn_per_joint = [[] for _ in range(7)]
@@ -703,54 +661,36 @@ def plot_fig3_statistical_distribution(
     ax_ecdf.legend(loc="lower right", framealpha=0.9, fontsize=8.5)
 
     plt.tight_layout()
-    suffix = f"_{lang}" if lang != "es" else ""
+    suffix = "_en"
     out_png = OUTPUT_DIR / f"fig3_statistical_error_distribution{suffix}.png"
     out_pdf = OUTPUT_DIR / f"fig3_statistical_error_distribution{suffix}.pdf"
     fig.savefig(out_png, dpi=300, bbox_inches="tight")
     fig.savefig(out_pdf, bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ Saved Figure 3 [{lang}]: {out_png}")
+    print(f"  ✓ Saved Figure 3: {out_png}")
 
 
-def plot_fig4_trajectory_and_drift(trials_data, lang: str = "en"):
+def plot_fig4_trajectory_and_drift(trials_data):
     """
     Figure 4: Spatial pelvic trajectory reconstruction and drift progression over distance.
     """
     sorted_trials = sorted(trials_data, key=lambda x: x["mean_ana"])
     median_trial = sorted_trials[len(sorted_trials) // 2]
 
-    if lang == "es":
-        title_traj = (
-            f"(a) Reconstrucción de la Trayectoria Pélvica ({median_trial['id']})"
-        )
-        xlabel_traj = "Coordenada Longitudinal $X$ (m)"
-        ylabel_traj = "Coordenada Vertical $Z$ (m)"
-        lbl_gt = "Verdad de Campo (ArUco)"
-        lbl_tcn = "TCN Lite (propuesto)"
-        lbl_ana = "Método Analítico"
-        lbl_static = "Red Estática (P+P)"
-        lbl_start = "Inicio"
-        lbl_end = "Fin"
+    title_traj = f"(a) Pelvic Trajectory Reconstruction ({median_trial['id']})"
+    xlabel_traj = "Longitudinal Position $X$ (m)"
+    ylabel_traj = "Vertical Position $Z$ (m)"
+    lbl_gt = "Optical Ground Truth (ArUco)"
+    lbl_tcn = "TCN Lite (Proposed)"
+    lbl_ana = "Analytical Pipeline"
+    lbl_static = "Static Network (P+P)"
+    lbl_start = "Start"
+    lbl_end = "End"
 
-        title_drift = "(b) Acumulación de Deriva en Función de la Distancia"
-        xlabel_drift = "Distancia Recorrida Acumulada (m)"
-        ylabel_drift = "Error de Trayectoria Absoluto ATE (m)"
-        end_prefix = "Fin"
-    else:
-        title_traj = f"(a) Pelvic Trajectory Reconstruction ({median_trial['id']})"
-        xlabel_traj = "Longitudinal Position $X$ (m)"
-        ylabel_traj = "Vertical Position $Z$ (m)"
-        lbl_gt = "Optical Ground Truth (ArUco)"
-        lbl_tcn = "TCN Lite (Proposed)"
-        lbl_ana = "Analytical Pipeline"
-        lbl_static = "Static Network (P+P)"
-        lbl_start = "Start"
-        lbl_end = "End"
-
-        title_drift = "(b) Odometry Drift Accumulation vs. Walked Distance"
-        xlabel_drift = "Cumulative Walked Distance (m)"
-        ylabel_drift = "Absolute Trajectory Error ATE (m)"
-        end_prefix = "End"
+    title_drift = "(b) Odometry Drift Accumulation vs. Walked Distance"
+    xlabel_drift = "Cumulative Walked Distance (m)"
+    ylabel_drift = "Absolute Trajectory Error ATE (m)"
+    end_prefix = "End"
 
     fig, (ax_traj, ax_drift) = plt.subplots(
         1, 2, figsize=(14, 5.0), gridspec_kw={"width_ratios": [1.1, 1.0]}
@@ -872,16 +812,16 @@ def plot_fig4_trajectory_and_drift(trials_data, lang: str = "en"):
     ax_drift.legend(loc="upper left", framealpha=0.9, fontsize=8.5)
 
     plt.tight_layout()
-    suffix = f"_{lang}" if lang != "es" else ""
+    suffix = "_en"
     out_png = OUTPUT_DIR / f"fig4_trajectory_and_drift_analysis{suffix}.png"
     out_pdf = OUTPUT_DIR / f"fig4_trajectory_and_drift_analysis{suffix}.pdf"
     fig.savefig(out_png, dpi=300, bbox_inches="tight")
     fig.savefig(out_pdf, bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ Saved Figure 4 [{lang}]: {out_png}")
+    print(f"  ✓ Saved Figure 4: {out_png}")
 
 
-def plot_fig5_biomechanical_and_bland_altman(trials_data, lang: str = "en"):
+def plot_fig5_biomechanical_and_bland_altman(trials_data):
     """
     Figure 5: Biomechanical ROM and Bland-Altman agreement.
     """
@@ -894,32 +834,17 @@ def plot_fig5_biomechanical_and_bland_altman(trials_data, lang: str = "en"):
     ana_v = tr["ana_v"]
     t = tr["time_s"]
 
-    if lang == "es":
-        title_rom = (
-            "(a) Flexión/Extensión de Rodilla Derecha ($r_{{\\text{{TCN}}}} = {r:.3f}$)"
-        )
-        xlabel_rom = "Tiempo (s)"
-        ylabel_rom = "Ángulo de Flexión de Rodilla (°)"
-        lbl_gt = "Verdad de Campo (ArUco)"
-        lbl_tcn = "TCN Lite (propuesto)"
-        lbl_ana = "Método Analítico"
+    title_rom = "(a) Right Knee Flexion/Extension ($r_{{\\text{{TCN}}}} = {r:.3f}$)"
+    xlabel_rom = "Time (s)"
+    ylabel_rom = "Knee Flexion Angle (°)"
+    lbl_gt = "Optical Ground Truth (ArUco)"
+    lbl_tcn = "TCN Lite (Proposed)"
+    lbl_ana = "Analytical Pipeline"
 
-        title_ba = "(b) Concordancia de Bland-Altman: TCN Lite vs. ArUco (Eje $X$)"
-        xlabel_ba = "Media de Posición $(M_1 + M_2)/2$ (m)"
-        ylabel_ba = "Diferencia $(M_{\\text{TCN}} - M_{\\text{GT}})$ (m)"
-        bias_lbl = "Sesgo"
-    else:
-        title_rom = "(a) Right Knee Flexion/Extension ($r_{{\\text{{TCN}}}} = {r:.3f}$)"
-        xlabel_rom = "Time (s)"
-        ylabel_rom = "Knee Flexion Angle (°)"
-        lbl_gt = "Optical Ground Truth (ArUco)"
-        lbl_tcn = "TCN Lite (Proposed)"
-        lbl_ana = "Analytical Pipeline"
-
-        title_ba = "(b) Bland-Altman Agreement: TCN Lite vs. ArUco (Forward Axis $X$)"
-        xlabel_ba = "Mean Position $(M_1 + M_2)/2$ (m)"
-        ylabel_ba = "Difference $(M_{\\text{TCN}} - M_{\\text{GT}})$ (m)"
-        bias_lbl = "Bias"
+    title_ba = "(b) Bland-Altman Agreement: TCN Lite vs. ArUco (Forward Axis $X$)"
+    xlabel_ba = "Mean Position $(M_1 + M_2)/2$ (m)"
+    ylabel_ba = "Difference $(M_{\\text{TCN}} - M_{\\text{GT}})$ (m)"
+    bias_lbl = "Bias"
 
     def compute_knee_angle(v_joints, side="r"):
         hip_idx = 0 if side == "r" else 1
@@ -1021,16 +946,16 @@ def plot_fig5_biomechanical_and_bland_altman(trials_data, lang: str = "en"):
     ax_ba.legend(loc="upper right", framealpha=0.9, fontsize=8.5)
 
     plt.tight_layout()
-    suffix = f"_{lang}" if lang != "es" else ""
+    suffix = "_en"
     out_png = OUTPUT_DIR / f"fig5_biomechanical_agreement{suffix}.png"
     out_pdf = OUTPUT_DIR / f"fig5_biomechanical_agreement{suffix}.pdf"
     fig.savefig(out_png, dpi=300, bbox_inches="tight")
     fig.savefig(out_pdf, bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ Saved Figure 5 [{lang}]: {out_png}")
+    print(f"  ✓ Saved Figure 5: {out_png}")
 
 
-def plot_fig6_3d_joint_trajectories(trials_data, lang: str = "en"):
+def plot_fig6_3d_joint_trajectories(trials_data):
     """
     Figure 6: 3D joint trajectories and intermediate gait pose reconstruction.
       Global 3D perspective showing continuous trajectories for all 6 joints
@@ -1070,46 +995,25 @@ def plot_fig6_3d_joint_trajectories(trials_data, lang: str = "en"):
         "#9467BD",  # Ankle L (Purple)
     ]
 
-    if lang == "es":
-        title = (
-            f"Trayectorias Articulares 3D y Pose Intermedia ({median_trial['id']})\n"
-            f"Línea continua / Círculos: ArUco (Ground Truth) | Línea discontinua / Cuadrados: TCN Lite | $t = {t_inter:.2f}$ s"
-        )
-        xlabel = "Eje Longitudinal $X$ (m)"
-        ylabel = "Eje Lateral $Y$ (m)"
-        zlabel = "Eje Vertical $Z$ (m)"
-        lbl_gt_traj = "Trayectoria ArUco (GT)"
-        lbl_tcn_traj = "Trayectoria TCN Lite"
-        lbl_gt_skel = f"Esqueleto ArUco ($t = {t_inter:.2f}$ s)"
-        lbl_tcn_skel = f"Esqueleto TCN Lite ($t = {t_inter:.2f}$ s)"
-        joint_names = [
-            "Cadera Der.",
-            "Cadera Izq.",
-            "Rodilla Der.",
-            "Rodilla Izq.",
-            "Tobillo Der.",
-            "Tobillo Izq.",
-        ]
-    else:
-        title = (
-            f"3D Joint Trajectories and Intermediate Pose ({median_trial['id']})\n"
-            f"Solid line / Circles: ArUco (Ground Truth) | Dashed line / Squares: TCN Lite (Proposed) | $t = {t_inter:.2f}$ s"
-        )
-        xlabel = "Longitudinal Axis $X$ (m)"
-        ylabel = "Lateral Axis $Y$ (m)"
-        zlabel = "Vertical Axis $Z$ (m)"
-        lbl_gt_traj = "ArUco Trajectory (GT)"
-        lbl_tcn_traj = "TCN Lite Trajectory"
-        lbl_gt_skel = f"ArUco Skeleton ($t = {t_inter:.2f}$ s)"
-        lbl_tcn_skel = f"TCN Lite Skeleton ($t = {t_inter:.2f}$ s)"
-        joint_names = [
-            "Right Hip",
-            "Left Hip",
-            "Right Knee",
-            "Left Knee",
-            "Right Ankle",
-            "Left Ankle",
-        ]
+    title = (
+        f"3D Joint Trajectories and Intermediate Pose ({median_trial['id']})\n"
+        f"Solid line / Circles: ArUco (Ground Truth) | Dashed line / Squares: TCN Lite (Proposed) | $t = {t_inter:.2f}$ s"
+    )
+    xlabel = "Longitudinal Axis $X$ (m)"
+    ylabel = "Lateral Axis $Y$ (m)"
+    zlabel = "Vertical Axis $Z$ (m)"
+    lbl_gt_traj = "ArUco Trajectory (GT)"
+    lbl_tcn_traj = "TCN Lite Trajectory"
+    lbl_gt_skel = f"ArUco Skeleton ($t = {t_inter:.2f}$ s)"
+    lbl_tcn_skel = f"TCN Lite Skeleton ($t = {t_inter:.2f}$ s)"
+    joint_names = [
+        "Right Hip",
+        "Left Hip",
+        "Right Knee",
+        "Left Knee",
+        "Right Ankle",
+        "Left Ankle",
+    ]
 
     fig = plt.figure(figsize=(11.0, 7.0), dpi=300)
     ax = fig.add_subplot(1, 1, 1, projection="3d")
@@ -1180,7 +1084,7 @@ def plot_fig6_3d_joint_trajectories(trials_data, lang: str = "en"):
             alpha=0.85,
         )
 
-    # 5. Joint markers plotted LAST ("hasta arriba") with ax.plot so no line covers them
+    # 5. Joint markers plotted LAST (on top) with ax.plot so no line covers them
     for j in range(6):
         ax.plot(
             [gt[f_inter, j, 0]],
@@ -1259,13 +1163,13 @@ def plot_fig6_3d_joint_trajectories(trials_data, lang: str = "en"):
     )
 
     plt.subplots_adjust(left=0.03, right=0.97, bottom=0.14, top=0.92)
-    suffix = f"_{lang}" if lang != "es" else ""
+    suffix = "_en"
     out_png = OUTPUT_DIR / f"fig6_3d_joint_trajectories{suffix}.png"
     out_pdf = OUTPUT_DIR / f"fig6_3d_joint_trajectories{suffix}.pdf"
     fig.savefig(out_png, dpi=300, bbox_inches="tight")
     fig.savefig(out_pdf, bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ Saved Figure 6 [{lang}]: {out_png}")
+    print(f"  ✓ Saved Figure 6: {out_png}")
 
 
 def compute_biomechanical_metrics(trials_data):
@@ -1299,9 +1203,9 @@ def compute_biomechanical_metrics(trials_data):
 
     def extract_strides_and_cadence(v_joints, time_s):
         """
-        Detecta zancadas completas bilaterales a partir de heel strikes consecutivos
-        del mismo pie (mínimos locales en Z). Filtra periodos fisiológicos de zancada
-        (0.8s a 2.2s) y distancias válidas (0.5m a 2.2m).
+        Detect complete bilateral strides from consecutive heel strikes
+        of the same foot (local minima in Z). Keep physiological stride periods
+        (0.8s to 2.2s) and valid distances (0.5m to 2.2m).
         """
         strides = []
         cadences = []
@@ -1431,49 +1335,45 @@ def compute_biomechanical_metrics(trials_data):
 
 
 def main():
+    global DATASET_PATH
     parser = argparse.ArgumentParser(
         description="Publication Figure Generator (MDPI Sensors / IEEE style)"
-    )
-    parser.add_argument(
-        "--lang",
-        type=str,
-        default="all",
-        choices=["all", "en", "es"],
-        help="Language to render figure text (default: 'all' generates both English and Spanish)",
     )
     parser.add_argument(
         "--no-cache",
         action="store_true",
         help="Force recomputation of full pipeline instead of using cache",
     )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=str(DATASET_PATH),
+        help="Dataset folder containing one sub-folder per subject (default: DataSet/)",
+    )
     args = parser.parse_args()
+    DATASET_PATH = Path(args.dataset)
 
     print("=" * 80)
-    print("  🎨 GENERADOR DE GRÁFICAS DE ERROR PARA EL ARTÍCULO (v2_manuscript)")
-    print("  MDPI Sensors Format | Multilingual Figures (EN / ES)")
+    print("  🎨 ERROR FIGURE GENERATOR FOR THE MANUSCRIPT (v2_manuscript)")
+    print("  MDPI Sensors format")
     print("=" * 80)
 
     trials_data, all_ana, all_tcn, all_static = run_pipeline_evaluation(
         use_cache=not args.no_cache
     )
 
-    langs = ["es", "en"] if args.lang == "all" else [args.lang]
+    print("\nGenerating the publication figures...")
+    plot_fig2_temporal_error(trials_data)
+    plot_fig3_statistical_distribution(trials_data, all_ana, all_tcn, all_static)
+    plot_fig4_trajectory_and_drift(trials_data)
+    plot_fig5_biomechanical_and_bland_altman(trials_data)
+    plot_fig6_3d_joint_trajectories(trials_data)
 
-    for lang in langs:
-        print(f"\nGenerando figuras para publicación en idioma: [{lang.upper()}]...")
-        plot_fig2_temporal_error(trials_data, lang=lang)
-        plot_fig3_statistical_distribution(
-            trials_data, all_ana, all_tcn, all_static, lang=lang
-        )
-        plot_fig4_trajectory_and_drift(trials_data, lang=lang)
-        plot_fig5_biomechanical_and_bland_altman(trials_data, lang=lang)
-        plot_fig6_3d_joint_trajectories(trials_data, lang=lang)
-
-    # Print the Section 3.3 biomechanical metrics (once, language-independent)
+    # Print the Section 3.3 biomechanical metrics
     compute_biomechanical_metrics(trials_data)
 
     print("\n" + "=" * 80)
-    print(f"  ✓ Todas las figuras generadas con éxito en: {OUTPUT_DIR}")
+    print(f"  ✓ All figures generated successfully in: {OUTPUT_DIR}")
     print("=" * 80)
 
 

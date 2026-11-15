@@ -1,19 +1,19 @@
 """
-Matriz de Experimentación para Optimización de Hiperparámetros
+Experiment matrix for hyperparameter optimization
 ==============================================================
 
-Este script evalúa el impacto de 9 hiperparámetros en el error de
-reconstrucción de la marcha:
+This script evaluates the impact of 9 hyperparameters on the gait
+reconstruction error:
 
-  1. Frecuencia de corte del filtro pasa bajas (Hz)
-  2. Orden del filtro Butterworth
-  3. Percentil PCA (umbral de movimiento para corrección de yaw)
-  4. Ganancia del filtro Madgwick
-  5. Clamp del peso Slerp de la cadera (slerp_clip_min)
-  6. Muestras de calibración en reposo
-  7. Filtro de fusión (Madgwick vs EKF)
-  8. Umbral de altura para cambio de pivote
-  9. Umbral de velocidad angular para swing override
+  1. Cut-off frequency of the low-pass filter (Hz)
+  2. Butterworth filter order
+  3. PCA percentile (motion threshold for the yaw correction)
+  4. Madgwick filter gain
+  5. Clamp of the hip Slerp weight (slerp_clip_min)
+  6. Calibration samples at rest
+  7. Fusion filter (Madgwick vs EKF)
+  8. Height threshold for the pivot switch
+  9. Angular-velocity threshold for the swing override
 """
 
 import itertools
@@ -37,7 +37,7 @@ DATA_SPLIT_PATH = Path(__file__).parent / "data_split.json"
 def get_files_from_split(
     dataset_path: str, subjects: list[int]
 ) -> list[tuple[str, str]]:
-    """Construye la lista de tuplas (mcd_file, aruco_file) para los sujetos dados."""
+    """Build the list of (mcd_file, aruco_file) tuples for the given subjects."""
     files = []
     for s in sorted(subjects):
         for i in range(4):
@@ -50,41 +50,41 @@ def get_files_from_split(
 
 
 # ─────────────────────────────────────────────────────────────
-# Grilla de parámetros (Targeted Grid: 432 combinaciones)
+# Parameter grid (full Cartesian product: 20,736 combinations)
 # ─────────────────────────────────────────────────────────────
 CUTOFF_FREQS = [7, 9, 11, 13]  # Hz
-FILTER_ORDERS = [5, 6, 7]  # Orden del Butterworth
-PCA_PERCENTILES = [5, 10, 20, 30]  # Percentil para umbral PCA
-MADGWICK_GAINS = [0.01, 0.02, 0.033]  # Ganancia del filtro Madgwick
+FILTER_ORDERS = [5, 6, 7]  # Butterworth order
+PCA_PERCENTILES = [5, 10, 20, 30]  # Percentile for the PCA threshold
+MADGWICK_GAINS = [0.01, 0.02, 0.033]  # Madgwick filter gain
 SLERP_CLIP_MINS = [
     0.3,
     0.5,
-]  # Peso Slerp de cadera mínimo (slerp_clip_max = 1.0 - min)
-CALIBRATION_SAMPLES_LIST = [60, 70, 80, 100]  # Muestras de calibración
-FUSION_FILTERS = ["madgwick", "ekf"]  # Tipo de filtro de fusión
+]  # Minimum hip Slerp weight (slerp_clip_max = 1.0 - min)
+CALIBRATION_SAMPLES_LIST = [60, 70, 80, 100]  # Calibration samples
+FUSION_FILTERS = ["madgwick", "ekf"]  # Fusion filter type
 PIVOT_HEIGHT_THRESHOLDS = [
     0.005,
     0.01,
     0.015,
-]  # Umbral de altura para cambio de pivote (m)
-SWING_VELOCITY_THRESHOLDS = [0.3, 0.5, 0.7]  # Umbral de velocidad angular (rad/s)
+]  # Height threshold for the pivot switch (m)
+SWING_VELOCITY_THRESHOLDS = [0.3, 0.5, 0.7]  # Angular-velocity threshold (rad/s)
 
 # CUTOFF_FREQS = [5, 7]  # Hz
-# FILTER_ORDERS = [4, 5, 6]  # Orden del Butterworth
-# PCA_PERCENTILES = [5, 10]  # Percentil para umbral PCA
-# MADGWICK_GAINS = [0.01, 0.02]  # Ganancia del filtro Madgwick
-# SLERP_CLIP_MINS = [0.3, 0.5]  # Peso Slerp de cadera mínimo (slerp_clip_max = 1.0 - min)
-# CALIBRATION_SAMPLES_LIST = [60, 70]  # Muestras de calibración
-# FUSION_FILTERS = ["madgwick"]  # Tipo de filtro de fusión
+# FILTER_ORDERS = [4, 5, 6]  # Butterworth order
+# PCA_PERCENTILES = [5, 10]  # Percentile for the PCA threshold
+# MADGWICK_GAINS = [0.01, 0.02]  # Madgwick filter gain
+# SLERP_CLIP_MINS = [0.3, 0.5]  # Minimum hip Slerp weight (slerp_clip_max = 1.0 - min)
+# CALIBRATION_SAMPLES_LIST = [60, 70]  # Calibration samples
+# FUSION_FILTERS = ["madgwick"]  # Fusion filter type
 # PIVOT_HEIGHT_THRESHOLDS = [
 #     0.005,
 #     0.01,
-# ]  # Umbral de altura para cambio de pivote (m)
-# SWING_VELOCITY_THRESHOLDS = [0.3, 0.5]  # Umbral de velocidad angular (rad/s)
+# ]  # Height threshold for the pivot switch (m)
+# SWING_VELOCITY_THRESHOLDS = [0.3, 0.5]  # Angular-velocity threshold (rad/s)
 
 OUTPUT_DIR = Path("Results/experiment_matrix")
 
-# Valores por defecto para graficar/comparar de forma individual
+# Default values for individual plots/comparisons
 DEFAULT_VALS = {
     "cutoff_freq": 9,
     "filter_order": 6,
@@ -110,7 +110,7 @@ def process_single_file(
     pivot_height_threshold,
     swing_velocity_threshold,
 ):
-    """Procesa un solo par de archivos con los parámetros dados."""
+    """Process a single file pair with the given parameters."""
     try:
         result = process_files(
             file_tuple,
@@ -130,7 +130,7 @@ def process_single_file(
             return None
         gen_error = result[0]
         homogeneous_data = result[4]
-        # Error euclidiano medio por punto (promedio de las 5 articulaciones)
+        # Mean Euclidean error per point (average of the 5 joints)
         mean_per_point = np.mean(
             [homogeneous_data[key]["euclidean_mean"] for key in homogeneous_data.keys()]
         )
@@ -155,7 +155,7 @@ def evaluate_combination(
     pivot_height_threshold,
     swing_velocity_threshold,
 ):
-    """Evalúa una combinación de hiperparámetros sobre todo el dataset."""
+    """Evaluate a hyperparameter combination over the whole dataset."""
     worker = partial(
         process_single_file,
         cutoff_freq=cutoff_freq,
@@ -201,7 +201,7 @@ def evaluate_combination(
 
 
 def save_csv(results, filepath):
-    """Guarda los resultados en un archivo CSV."""
+    """Save the results to a CSV file."""
     if not results:
         return
     fieldnames = results[0].keys()
@@ -209,12 +209,12 @@ def save_csv(results, filepath):
         writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=";")
         writer.writeheader()
         writer.writerows(results)
-    print(f"  CSV guardado: {filepath}")
+    print(f"  CSV saved: {filepath}")
 
 
 def plot_heatmaps_by_pca(results, output_dir):
-    """Genera heatmaps (freq_corte vs orden) para cada percentil PCA, manteniendo otros defaults."""
-    # Filtramos donde otros parámetros tengan su valor por defecto (o el más cercano)
+    """Plot heatmaps (cutoff_freq vs order) for each PCA percentile, keeping the other defaults."""
+    # Keep the rows where the other parameters have their default value (or the closest one)
     for pca in PCA_PERCENTILES:
         subset = [
             r
@@ -248,10 +248,10 @@ def plot_heatmaps_by_pca(results, output_dir):
         ax.set_xticks(range(len(freqs)))
         ax.set_xticklabels([f"{f} Hz" for f in freqs])
         ax.set_yticks(range(len(orders)))
-        ax.set_yticklabels([f"Orden {o}" for o in orders])
-        ax.set_xlabel("Frecuencia de Corte (Hz)")
-        ax.set_ylabel("Orden del Filtro")
-        ax.set_title(f"Error Medio (m) — PCA={pca}% (Filtros en defaults)")
+        ax.set_yticklabels([f"Order {o}" for o in orders])
+        ax.set_xlabel("Cut-off frequency (Hz)")
+        ax.set_ylabel("Filter order")
+        ax.set_title(f"Mean error (m) — PCA={pca}% (filters at defaults)")
 
         for i in range(len(orders)):
             for j in range(len(freqs)):
@@ -269,15 +269,15 @@ def plot_heatmaps_by_pca(results, output_dir):
                         fontweight="bold",
                     )
 
-        plt.colorbar(im, ax=ax, label="Error Euclidiano Medio (m)")
+        plt.colorbar(im, ax=ax, label="Mean Euclidean error (m)")
         plt.tight_layout()
         fig.savefig(output_dir / f"heatmap_pca_{pca}.png", dpi=200, bbox_inches="tight")
         plt.close(fig)
-        print(f"  Heatmap guardado: heatmap_pca_{pca}.png")
+        print(f"  Heatmap saved: heatmap_pca_{pca}.png")
 
 
 def plot_heatmaps_by_order(results, output_dir):
-    """Genera heatmaps (freq_corte vs percentil_PCA) para cada orden del filtro, en defaults."""
+    """Plot heatmaps (cutoff_freq vs PCA_percentile) for each filter order, at defaults."""
     for order in FILTER_ORDERS:
         subset = [
             r
@@ -312,9 +312,9 @@ def plot_heatmaps_by_order(results, output_dir):
         ax.set_xticklabels([f"{f} Hz" for f in freqs])
         ax.set_yticks(range(len(pcas)))
         ax.set_yticklabels([f"{p}%" for p in pcas])
-        ax.set_xlabel("Frecuencia de Corte (Hz)")
-        ax.set_ylabel("Percentil PCA")
-        ax.set_title(f"Error Medio (m) — Orden del Filtro {order} (Defaults)")
+        ax.set_xlabel("Cut-off frequency (Hz)")
+        ax.set_ylabel("PCA percentile")
+        ax.set_title(f"Mean error (m) — filter order {order} (defaults)")
 
         for i in range(len(pcas)):
             for j in range(len(freqs)):
@@ -332,58 +332,58 @@ def plot_heatmaps_by_order(results, output_dir):
                         fontweight="bold",
                     )
 
-        plt.colorbar(im, ax=ax, label="Error Euclidiano Medio (m)")
+        plt.colorbar(im, ax=ax, label="Mean Euclidean error (m)")
         plt.tight_layout()
         fig.savefig(
             output_dir / f"heatmap_order_{order}.png", dpi=200, bbox_inches="tight"
         )
         plt.close(fig)
-        print(f"  Heatmap guardado: heatmap_order_{order}.png")
+        print(f"  Heatmap saved: heatmap_order_{order}.png")
 
 
 def plot_trend_lines(results, output_dir):
-    """Genera gráficas de tendencia del error vs cada parámetro individual."""
+    """Plot trends of the error vs each individual parameter."""
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     axes = axes.flatten()
 
-    # 1. Error vs Frecuencia de corte
+    # 1. Error vs cut-off frequency
     freqs = sorted(set(r["cutoff_freq"] for r in results))
     avg_by_freq = [
         np.mean([r["mean_error"] for r in results if r["cutoff_freq"] == f])
         for f in freqs
     ]
     axes[0].plot(freqs, avg_by_freq, "o-b", linewidth=2)
-    axes[0].set_xlabel("Frecuencia de Corte (Hz)")
-    axes[0].set_ylabel("Error Medio (m)")
-    axes[0].set_title("Frecuencia de Corte", fontweight="bold")
+    axes[0].set_xlabel("Cut-off frequency (Hz)")
+    axes[0].set_ylabel("Mean error (m)")
+    axes[0].set_title("Cut-off frequency", fontweight="bold")
     axes[0].grid(True, alpha=0.3)
     axes[0].set_xticks(freqs)
 
-    # 2. Error vs Orden del filtro
+    # 2. Error vs filter order
     orders = sorted(set(r["filter_order"] for r in results))
     avg_by_order = [
         np.mean([r["mean_error"] for r in results if r["filter_order"] == o])
         for o in orders
     ]
     axes[1].plot(orders, avg_by_order, "o-g", linewidth=2)
-    axes[1].set_xlabel("Orden del Filtro")
-    axes[1].set_title("Orden del Filtro", fontweight="bold")
+    axes[1].set_xlabel("Filter order")
+    axes[1].set_title("Filter order", fontweight="bold")
     axes[1].grid(True, alpha=0.3)
     axes[1].set_xticks(orders)
 
-    # 3. Error vs Percentil PCA
+    # 3. Error vs PCA percentile
     pcas = sorted(set(r["pca_percentile"] for r in results))
     avg_by_pca = [
         np.mean([r["mean_error"] for r in results if r["pca_percentile"] == p])
         for p in pcas
     ]
     axes[2].plot(pcas, avg_by_pca, "o-r", linewidth=2)
-    axes[2].set_xlabel("Percentil PCA")
-    axes[2].set_title("Percentil PCA", fontweight="bold")
+    axes[2].set_xlabel("PCA percentile")
+    axes[2].set_title("PCA percentile", fontweight="bold")
     axes[2].grid(True, alpha=0.3)
     axes[2].set_xticks(pcas)
 
-    # 4. Error vs Ganancia Madgwick (solo filtrando madgwick)
+    # 4. Error vs Madgwick gain (Madgwick rows only)
     gains = sorted(
         set(r["madgwick_gain"] for r in results if r["fusion_filter"] == "madgwick")
     )
@@ -399,12 +399,12 @@ def plot_trend_lines(results, output_dir):
             for g in gains
         ]
         axes[3].plot(gains, avg_by_gain, "o-c", linewidth=2)
-        axes[3].set_xlabel("Ganancia Madgwick")
-        axes[3].set_title("Ganancia Madgwick (filtro = madgwick)", fontweight="bold")
+        axes[3].set_xlabel("Madgwick gain")
+        axes[3].set_title("Madgwick gain (filter = madgwick)", fontweight="bold")
         axes[3].grid(True, alpha=0.3)
         axes[3].set_xticks(gains)
 
-    # 5. Error vs Filtro de Fusión
+    # 5. Error vs fusion filter
     filters = sorted(set(r["fusion_filter"] for r in results))
     avg_by_filter = [
         np.mean([r["mean_error"] for r in results if r["fusion_filter"] == f])
@@ -413,41 +413,41 @@ def plot_trend_lines(results, output_dir):
     axes[4].bar(
         filters, avg_by_filter, color=["#4472C4", "#ED7D31"], alpha=0.8, width=0.4
     )
-    axes[4].set_ylabel("Error Medio (m)")
-    axes[4].set_title("Filtro de Fusión")
+    axes[4].set_ylabel("Mean error (m)")
+    axes[4].set_title("Fusion filter")
     axes[4].grid(True, alpha=0.3)
 
-    # 6. Error vs Umbral de Altura Pivote
+    # 6. Error vs pivot height threshold
     pivots = sorted(set(r["pivot_height_threshold"] for r in results))
     avg_by_pivot = [
         np.mean([r["mean_error"] for r in results if r["pivot_height_threshold"] == p])
         for p in pivots
     ]
     axes[5].plot(pivots, avg_by_pivot, "o-m", linewidth=2)
-    axes[5].set_xlabel("Umbral de Altura Pivote (m)")
-    axes[5].set_title("Umbral Altura Pivote")
+    axes[5].set_xlabel("Pivot height threshold (m)")
+    axes[5].set_title("Pivot height threshold")
     axes[5].grid(True, alpha=0.3)
     axes[5].set_xticks(pivots)
 
     plt.suptitle(
-        "Tendencias Globales Promedio por Hiperparámetro",
+        "Mean global trends per hyperparameter",
         fontsize=14,
         fontweight="bold",
     )
     plt.tight_layout()
     fig.savefig(output_dir / "trend_lines.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
-    print(f"  Tendencias guardadas: trend_lines.png")
+    print(f"  Trends saved: trend_lines.png")
 
 
 def print_top_n(results, n=5):
-    """Imprime las Top-N mejores combinaciones."""
+    """Print the top-N best combinations."""
     sorted_results = sorted(results, key=lambda r: r["mean_error"])
     print(f"\n{'='*110}")
-    print(f"  Top-{n} Mejores Combinaciones de Hiperparámetros")
+    print(f"  Top-{n} best hyperparameter combinations")
     print(f"{'='*110}")
     print(
-        f"  {'#':>3}  {'Cutoff':>6}  {'Order':>5}  {'PCA%':>4}  {'Gain':>6}  {'Filter':>8}  {'Pivot':>6}  {'Swing':>5}  {'Error Medio':>11}  {'Std':>8}"
+        f"  {'#':>3}  {'Cutoff':>6}  {'Order':>5}  {'PCA%':>4}  {'Gain':>6}  {'Filter':>8}  {'Pivot':>6}  {'Swing':>5}  {'Mean error':>11}  {'Std':>8}"
     )
     print(
         f"  {'-'*3}  {'-'*6}  {'-'*5}  {'-'*4}  {'-'*6}  {'-'*8}  {'-'*6}  {'-'*5}  {'-'*11}  {'-'*8}"
@@ -462,8 +462,8 @@ def print_top_n(results, n=5):
         )
     print(f"{'='*110}")
 
-    # También las peores 5
-    print(f"\n  Bottom-{n} Peores Combinaciones")
+    # Also the 5 worst
+    print(f"\n  Bottom-{n} worst combinations")
     print(
         f"  {'-'*3}  {'-'*6}  {'-'*5}  {'-'*4}  {'-'*6}  {'-'*8}  {'-'*6}  {'-'*5}  {'-'*11}  {'-'*8}"
     )
@@ -479,7 +479,7 @@ def print_top_n(results, n=5):
 
 
 def plot_summary_table(results, output_dir, n=10):
-    """Genera una imagen con la tabla resumen de las mejores combinaciones."""
+    """Produce an image with the summary table of the best combinations."""
     sorted_results = sorted(results, key=lambda r: r["mean_error"])[:n]
 
     fig, ax = plt.subplots(figsize=(14, max(3, 0.4 * n + 1.5)))
@@ -488,13 +488,13 @@ def plot_summary_table(results, output_dir, n=10):
     headers = [
         "#",
         "Cutoff (Hz)",
-        "Orden",
+        "Order",
         "PCA %",
         "Gain",
         "Filter",
         "Pivot (m)",
         "Swing (rad/s)",
-        "Error Medio",
+        "Mean error",
         "Std",
     ]
     cell_data = []
@@ -524,23 +524,23 @@ def plot_summary_table(results, output_dir, n=10):
     table.set_fontsize(8)
     table.scale(1, 1.4)
 
-    # Colorear encabezados
+    # Colour the headers
     for j, header in enumerate(headers):
         table[0, j].set_facecolor("#4472C4")
         table[0, j].set_text_props(color="white", fontweight="bold")
 
-    # Colorear filas alternas
+    # Colour alternate rows
     for i in range(len(cell_data)):
         color = "#D6E4F0" if i % 2 == 0 else "white"
         for j in range(len(headers)):
             table[i + 1, j].set_facecolor(color)
 
-    # Resaltar la mejor
+    # Highlight the best one
     for j in range(len(headers)):
         table[1, j].set_facecolor("#92D050")
 
     ax.set_title(
-        f"Top-{n} Mejores Combinaciones de los 9 Hiperparámetros",
+        f"Top-{n} best combinations of the 9 hyperparameters",
         fontsize=14,
         fontweight="bold",
         pad=20,
@@ -548,11 +548,11 @@ def plot_summary_table(results, output_dir, n=10):
     plt.tight_layout()
     fig.savefig(output_dir / "summary_table.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
-    print(f"  Tabla resumen guardada: summary_table.png")
+    print(f"  Summary table saved: summary_table.png")
 
 
 def format_time(seconds):
-    """Formatea una cantidad de segundos en h/m/s."""
+    """Format a number of seconds as h/m/s."""
     hours, remainder = divmod(int(seconds), 3600)
     minutes, secs = divmod(remainder, 60)
     if hours > 0:
@@ -567,21 +567,21 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Matriz de experimentación de hiperparámetros para GaitTracking"
+        description="Hyperparameter experiment matrix for GaitTracking"
     )
     parser.add_argument(
         "--dataset",
         type=str,
-        required=True,
-        help="Ruta a la carpeta raíz del dataset (ej: /media/user/data/dataset)",
+        default="DataSet",
+        help="Dataset folder containing one sub-folder per subject (default: DataSet/ in the repository root)",
     )
     args = parser.parse_args()
 
     # ─────────────────────────────────────────────────────────
-    # 1. Cargar data_split.json y construir listas de archivos
+    # 1. Load data_split.json and build the file lists
     # ─────────────────────────────────────────────────────────
     if not DATA_SPLIT_PATH.exists():
-        print(f"[ERROR] No se encontró {DATA_SPLIT_PATH}")
+        print(f"[ERROR] {DATA_SPLIT_PATH} not found")
         sys.exit(1)
 
     with open(DATA_SPLIT_PATH) as f:
@@ -595,16 +595,16 @@ if __name__ == "__main__":
     val_files = get_files_from_split(args.dataset, val_subjects)
     test_files = get_files_from_split(args.dataset, test_subjects)
 
-    print(f"\nTrain: {len(train_subjects)} sujetos → {len(train_files)} archivos")
-    print(f"Val:   {len(val_subjects)} sujetos → {len(val_files)} archivos")
-    print(f"Test:  {len(test_subjects)} sujetos → {len(test_files)} archivos")
+    print(f"\nTrain: {len(train_subjects)} subjects → {len(train_files)} files")
+    print(f"Val:   {len(val_subjects)} subjects → {len(val_files)} files")
+    print(f"Test:  {len(test_subjects)} subjects → {len(test_files)} files")
 
     if len(train_files) == 0:
-        print("[ERROR] No se encontraron archivos de entrenamiento.")
+        print("[ERROR] No training files found.")
         sys.exit(1)
 
     # ─────────────────────────────────────────────────────────
-    # 2. Generar todas las combinaciones
+    # 2. Generate all the combinations
     # ─────────────────────────────────────────────────────────
     combinations = list(
         itertools.product(
@@ -620,20 +620,20 @@ if __name__ == "__main__":
         )
     )
     total = len(combinations)
-    print(f"Total de combinaciones a evaluar: {total}")
+    print(f"Total combinations to evaluate: {total}")
     print()
 
     # ─────────────────────────────────────────────────────────
-    # 3. Crear directorio de salida
+    # 3. Create the output directory
     # ─────────────────────────────────────────────────────────
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # ─────────────────────────────────────────────────────────
-    # 4. Ejecutar experimentos (con guardado incremental de CSV)
+    # 4. Run the experiments (with incremental CSV saving)
     # ─────────────────────────────────────────────────────────
     all_results = []
     start_time = time.time()
-    cumulative_times = []  # Lista de (índice, tiempo_acumulado) para regresión
+    cumulative_times = []  # List of (index, cumulative_time) for the regression
 
     csv_path = OUTPUT_DIR / "experiment_matrix.csv"
     csv_fieldnames = [
@@ -696,16 +696,16 @@ if __name__ == "__main__":
         cumulative_elapsed = time.time() - start_time
         cumulative_times.append((idx, cumulative_elapsed))
 
-        # Estimar ETA usando regresión lineal sobre tiempos acumulados
+        # Estimate the ETA with a linear regression over the cumulative times
         if len(cumulative_times) >= 3:
-            # Regresión lineal: tiempo_acumulado = m * índice + b
+            # Linear regression: cumulative_time = m * index + b
             xs = np.array([ct[0] for ct in cumulative_times])
             ys = np.array([ct[1] for ct in cumulative_times])
             m, b = np.polyfit(xs, ys, 1)
             predicted_total_time = m * total + b
             eta_seconds = max(0.0, predicted_total_time - cumulative_elapsed)
         else:
-            # Fallback: promedio simple cuando hay pocos datos
+            # Fallback: simple average when there are few data points
             avg_per_experiment = cumulative_elapsed / idx
             eta_seconds = avg_per_experiment * (total - idx)
         eta_str = format_time(eta_seconds)
@@ -715,55 +715,55 @@ if __name__ == "__main__":
             csv_writer.writerow(result)
             csv_file.flush()
             print(
-                f"  error={result['mean_error']:.6f}  ({elapsed:.1f}s | ETA: {eta_str})  [{result['n_valid']}/{result['n_total']} válidos]"
+                f"  error={result['mean_error']:.6f}  ({elapsed:.1f}s | ETA: {eta_str})  [{result['n_valid']}/{result['n_total']} valid]"
             )
         else:
-            print(f"  FALLÓ ({elapsed:.1f}s | ETA: {eta_str})")
+            print(f"  FAILED ({elapsed:.1f}s | ETA: {eta_str})")
 
     csv_file.close()
 
     total_time = time.time() - start_time
     print(f"\n{'─'*60}")
-    print(f"Experimentos completados en {total_time:.1f}s ({total_time/60:.1f} min)")
-    print(f"Resultados válidos: {len(all_results)}/{total}")
+    print(f"Experiments completed in {total_time:.1f}s ({total_time/60:.1f} min)")
+    print(f"Valid results: {len(all_results)}/{total}")
     print(f"{'─'*60}")
 
     if len(all_results) == 0:
-        print("No se obtuvieron resultados válidos.")
+        print("No valid results were obtained.")
         sys.exit(1)
 
     # ─────────────────────────────────────────────────────────
-    # 6. Generar visualizaciones
+    # 6. Generate visualizations
     # ─────────────────────────────────────────────────────────
-    print("\nGenerando visualizaciones...")
+    print("\nGenerating visualizations...")
     plot_heatmaps_by_pca(all_results, OUTPUT_DIR)
     plot_heatmaps_by_order(all_results, OUTPUT_DIR)
     plot_trend_lines(all_results, OUTPUT_DIR)
     plot_summary_table(all_results, OUTPUT_DIR, n=10)
 
     # ─────────────────────────────────────────────────────────
-    # 7. Imprimir resumen (train)
+    # 7. Print the summary (train)
     # ─────────────────────────────────────────────────────────
     print_top_n(all_results, n=5)
 
-    # Mejor combinación según train
+    # Best combination on train
     best = min(all_results, key=lambda r: r["mean_error"])
-    print(f"\n✓ MEJOR COMBINACIÓN (train):")
-    print(f"  Frecuencia de corte:        {best['cutoff_freq']} Hz")
-    print(f"  Orden del filtro:           {best['filter_order']}")
-    print(f"  Percentil PCA:              {best['pca_percentile']}%")
-    print(f"  Ganancia Madgwick:          {best['madgwick_gain']}")
-    print(f"  Filtro de fusión:           {best['fusion_filter']}")
-    print(f"  Umbral de altura pivote:    {best['pivot_height_threshold']} m")
-    print(f"  Umbral velocidad swing:     {best['swing_velocity_threshold']} rad/s")
-    print(f"  Error medio (train):        {best['mean_error']:.6f} m")
+    print(f"\n✓ BEST COMBINATION (train):")
+    print(f"  Cut-off frequency:          {best['cutoff_freq']} Hz")
+    print(f"  Filter order:               {best['filter_order']}")
+    print(f"  PCA percentile:             {best['pca_percentile']}%")
+    print(f"  Madgwick gain:              {best['madgwick_gain']}")
+    print(f"  Fusion filter:              {best['fusion_filter']}")
+    print(f"  Pivot height threshold:     {best['pivot_height_threshold']} m")
+    print(f"  Swing velocity threshold:   {best['swing_velocity_threshold']} rad/s")
+    print(f"  Mean error (train):         {best['mean_error']:.6f} m")
 
     # ─────────────────────────────────────────────────────────
-    # 8. Validación con la mejor combinación (val split)
+    # 8. Validation with the best combination (val split)
     # ─────────────────────────────────────────────────────────
     print(f"\n{'─'*60}")
-    print(f"VALIDACIÓN — {len(val_subjects)} sujetos: {val_subjects}")
-    print(f"  Archivos encontrados: {len(val_files)}")
+    print(f"VALIDATION — {len(val_subjects)} subjects: {val_subjects}")
+    print(f"  Files found: {len(val_files)}")
 
     if len(val_files) > 0:
         val_result = evaluate_combination(
@@ -779,23 +779,23 @@ if __name__ == "__main__":
             best["swing_velocity_threshold"],
         )
         if val_result is not None:
-            print(f"  Error medio (val):          {val_result['mean_error']:.6f} m")
+            print(f"  Mean error (val):           {val_result['mean_error']:.6f} m")
             print(f"  Std (val):                  {val_result['std_error']:.6f} m")
             print(
-                f"  Válidos:                    {val_result['n_valid']}/{val_result['n_total']}"
+                f"  Valid:                      {val_result['n_valid']}/{val_result['n_total']}"
             )
             save_csv([val_result], OUTPUT_DIR / "val_result.csv")
         else:
-            print("  [ERROR] Validación falló.")
+            print("  [ERROR] Validation failed.")
     else:
-        print("  [WARN] No se encontraron archivos de validación, se omite.")
+        print("  [WARN] No validation files found, skipping.")
 
     # ─────────────────────────────────────────────────────────
-    # 9. Test final con la mejor combinación (test split)
+    # 9. Final test with the best combination (test split)
     # ─────────────────────────────────────────────────────────
     print(f"\n{'─'*60}")
-    print(f"TEST FINAL — {len(test_subjects)} sujetos: {test_subjects}")
-    print(f"  Archivos encontrados: {len(test_files)}")
+    print(f"FINAL TEST — {len(test_subjects)} subjects: {test_subjects}")
+    print(f"  Files found: {len(test_files)}")
 
     if len(test_files) > 0:
         test_result = evaluate_combination(
@@ -811,16 +811,16 @@ if __name__ == "__main__":
             best["swing_velocity_threshold"],
         )
         if test_result is not None:
-            print(f"  Error medio (test):         {test_result['mean_error']:.6f} m")
+            print(f"  Mean error (test):          {test_result['mean_error']:.6f} m")
             print(f"  Std (test):                 {test_result['std_error']:.6f} m")
             print(
-                f"  Válidos:                    {test_result['n_valid']}/{test_result['n_total']}"
+                f"  Valid:                      {test_result['n_valid']}/{test_result['n_total']}"
             )
             save_csv([test_result], OUTPUT_DIR / "test_result.csv")
         else:
-            print("  [ERROR] Test falló.")
+            print("  [ERROR] Test failed.")
     else:
-        print("  [WARN] No se encontraron archivos de test, se omite.")
+        print("  [WARN] No test files found, skipping.")
 
     print(f"\n{'─'*60}")
-    print(f"Resultados guardados en: {OUTPUT_DIR.resolve()}")
+    print(f"Results saved to: {OUTPUT_DIR.resolve()}")

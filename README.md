@@ -1,46 +1,62 @@
 # GaitTrackingProject
 
-Reconstrucción 3D de la marcha del tren inferior a partir de 4 IMUs, comparando un pipeline cinemático analítico contra varias redes neuronales, con marcadores ArUco como ground truth.
+3D reconstruction of lower-limb gait from 4 IMUs, comparing an analytical kinematic pipeline against several neural networks, with ArUco markers as ground truth.
 
-## Estructura
+## Structure
 
 ```
-process_all.py                         Pipeline analítico (Madgwick/EKF + PCA + cinemática directa); librería base
-evaluate_full_neural_vs_analytical.py  Comparativa final: analítico vs todas las redes
-experiment_matrix.py                   Grid search de hiperparámetros del pipeline analítico
-experiment_matrix_tcn.py               Grid search de hiperparámetros de TCN Lite
-analyze_results.py                     Análisis/gráficas del CSV de experiment_matrix.py
-generate_manuscript_figures.py         Figuras del manuscrito (v2_manuscript/figures/)
-generate_split.py, data_split.json     División fija de sujetos train/val/test
+process_all.py                         Analytical pipeline (Madgwick/EKF + PCA + forward kinematics); base library
+evaluate_full_neural_vs_analytical.py  Final comparison: analytical vs all the networks
+experiment_matrix.py                   Hyperparameter grid search of the analytical pipeline
+experiment_matrix_tcn.py               Hyperparameter grid search of TCN Lite
+analyze_results.py                     Analysis/plots of the experiment_matrix.py CSV
+generate_manuscript_figures.py         Manuscript figures (v2_manuscript/figures/)
+generate_split.py, data_split.json     Fixed train/val/test subject split
+benchmark_timing.py                    Execution-time benchmark (latency per window, analytical pipeline)
+train_all.sh                           Retrains the 5 networks (see docs/REPRODUCIBILITY.md)
+reproducibility/                       Scripts for reviewers: evaluation, multi-seed retraining, timing
 
-models/                                Redes neuronales (entrenamiento + clases usadas en la evaluación)
-  nn_tcn_lite.py                       TCN dilatada no causal (modelo propuesto)
-  nn_ttl_lite.py                       Híbrido TCN + Transformer
+models/                                Neural networks (training + classes used in the evaluation)
+  nn_tcn_lite.py                       Non-causal dilated TCN (proposed model)
+  nn_ttl_lite.py                       TCN + Transformer hybrid
   nn_transformer_multitask.py          Conv1D + BiLSTM + Transformer
-  nn_pivot_classifier.py               Clasificador de pie de apoyo
-  nn_static_pivot.py                   Pose relativa al pie pivote
+  nn_pivot_classifier.py               Stance-foot classifier
+  nn_static_pivot.py                   Pose relative to the pivot foot
 
-nn-results/                            Checkpoints y resultados de las redes
-v2_manuscript/                         Manuscrito (template.tex/.md/.pdf, secciones, figuras)
-docs/                                  Notas de trabajo, guía de códigos, respuesta a revisores
+nn-results/                            Network checkpoints and results
+v2_manuscript/                         Manuscript (template.tex/.md/.pdf, sections, figures)
+docs/                                  Code guide, training reproducibility, figure-change notes
 ```
 
-`Results/` (salidas del pipeline analítico y de las matrices) no está versionado.
+`DataSet/` (the dataset, see above) and `Results/` (outputs of the analytical pipeline and of the experiment matrices) are not under version control.
 
-## Uso
+## Dataset
 
-Todos los comandos se ejecutan desde la raíz del repositorio.
+The scripts expect the dataset in a folder called `DataSet/` in the repository root, with one sub-folder per subject (`DataSet/1/`, …, `DataSet/30/`), each holding the `mcd-<n>.csv` (IMU) and `arUcos-<n>.csv` (ArUco ground truth) files of every trial. The dataset is distributed as `DataSet_GaitFromIMU.zip`; the subject folders are inside `DataSet_Final/DataSet/`:
+
+```bash
+unzip DataSet_GaitFromIMU.zip
+mv DataSet_Final/DataSet ./DataSet      # run from the repository root
+```
+
+`DataSet/` is in `.gitignore`. To keep the dataset elsewhere, pass `--dataset /path/to/DataSet` to any script (or set `DATASET=/path/to/DataSet` for the shell scripts).
+
+## Usage
+
+All commands are run from the repository root.
 
 ```bash
 pip install -r requirements.txt
 
-python process_all.py                          # pipeline analítico
-python experiment_matrix.py                    # grid search analítico
-python analyze_results.py                      # análisis del grid search
-python -m models.nn_tcn_lite                   # entrenar un modelo (igual para los demás en models/)
-python experiment_matrix_tcn.py                # grid search TCN Lite
-python evaluate_full_neural_vs_analytical.py   # comparativa final
-python generate_manuscript_figures.py          # figuras del manuscrito
+python process_all.py                            # analytical pipeline
+python experiment_matrix.py                       # analytical grid search
+python analyze_results.py                         # grid-search analysis
+python -m models.nn_tcn_lite                      # train a model (same for the others in models/)
+python experiment_matrix_tcn.py                   # TCN Lite grid search
+python evaluate_full_neural_vs_analytical.py      # final comparison
+python generate_manuscript_figures.py             # manuscript figures
 ```
 
-Ver [docs/GUIA_DE_CODIGOS.md](docs/GUIA_DE_CODIGOS.md) para el detalle de cada script.
+To reproduce the results of the paper (evaluation, retraining with several seeds, and timing), see [reproducibility/README.md](reproducibility/README.md).
+
+See [docs/CODE_GUIDE.md](docs/CODE_GUIDE.md) for details on each script.

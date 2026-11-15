@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# Reentrena todas las redes del artículo con la configuración documentada en
-# docs/REPRODUCIBILIDAD.md (misma semilla y misma división de sujetos).
+# Retrain all the networks of the paper with the configuration documented in
+# docs/REPRODUCIBILITY.md (same seed and same subject split).
 #
-# Uso (desde la raíz del repositorio):
-#   ./train_all.sh                 # entrena las 5 redes en orden
-#   ./train_all.sh tcn ttl         # solo las redes indicadas
+# Usage (from the repository root):
+#   ./train_all.sh                 # train the 5 networks in order
+#   ./train_all.sh tcn ttl         # only the given networks
 #
-# Redes: pivot, static, tcn, ttl, trans
-# ⚠ Sobrescribe los checkpoints de nn-results/<red>/checkpoints/. Haz backup antes.
+# Networks: pivot, static, tcn, ttl, trans
+# ⚠ Overwrites the checkpoints in nn-results/<net>/checkpoints/. Make a backup first.
 
 set -euo pipefail
 
 PYTHON="${PYTHON:-.venv/bin/python}"
 SEED="${SEED:-42}"
 SPLIT="${SPLIT:-data_split.json}"
-DATASET="${DATASET:-$HOME/Documents/DataSet}"
+DATASET="${DATASET:-DataSet}"
 LOG_DIR="${LOG_DIR:-nn-results/train_logs}"
 
 COMMON=(--seed "$SEED" --data-split "$SPLIT" --dataset "$DATASET")
@@ -31,9 +31,9 @@ NETS=("$@")
 
 mkdir -p "$LOG_DIR"
 for net in "${NETS[@]}"; do
-    [ -n "${CMD[$net]:-}" ] || { echo "Red desconocida: $net (usa: pivot static tcn ttl trans)"; exit 1; }
+    [ -n "${CMD[$net]:-}" ] || { echo "Unknown network: $net (use: pivot static tcn ttl trans)"; exit 1; }
     echo "▶ $net: $PYTHON -m ${CMD[$net]} ${COMMON[*]}"
     # shellcheck disable=SC2086
     "$PYTHON" -m ${CMD[$net]} "${COMMON[@]}" > "$LOG_DIR/$net.log" 2>&1
-    echo "  ✓ terminado (log: $LOG_DIR/$net.log)"
+    echo "  ✓ done (log: $LOG_DIR/$net.log)"
 done
