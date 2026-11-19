@@ -35,6 +35,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 from mpl_toolkits.mplot3d import Axes3D
+from matplotlib.legend_handler import HandlerTuple
 from matplotlib.lines import Line2D
 import torch
 
@@ -995,17 +996,16 @@ def plot_fig6_3d_joint_trajectories(trials_data):
         "#9467BD",  # Ankle L (Purple)
     ]
 
-    title = (
-        f"3D Joint Trajectories and Intermediate Pose ({median_trial['id']})\n"
-        f"Solid line / Circles: ArUco (Ground Truth) | Dashed line / Squares: TCN Lite (Proposed) | $t = {t_inter:.2f}$ s"
-    )
+    title = f"3D Joint Trajectories and Intermediate Pose ({median_trial['id']})"
     xlabel = "Longitudinal Axis $X$ (m)"
     ylabel = "Lateral Axis $Y$ (m)"
     zlabel = "Vertical Axis $Z$ (m)"
-    lbl_gt_traj = "ArUco Trajectory (GT)"
-    lbl_tcn_traj = "TCN Lite Trajectory"
-    lbl_gt_skel = f"ArUco Skeleton ($t = {t_inter:.2f}$ s)"
-    lbl_tcn_skel = f"TCN Lite Skeleton ($t = {t_inter:.2f}$ s)"
+    title_source = "Source"
+    title_joints = "Joint (color)"
+    lbl_gt_traj = "ArUco (GT): trajectory and joint"
+    lbl_tcn_traj = "TCN Lite: trajectory and joint"
+    lbl_gt_skel = f"ArUco skeleton at $t = {t_inter:.2f}$ s"
+    lbl_tcn_skel = f"TCN Lite skeleton at $t = {t_inter:.2f}$ s"
     joint_names = [
         "Right Hip",
         "Left Hip",
@@ -1039,20 +1039,7 @@ def plot_fig6_3d_joint_trajectories(trials_data):
             alpha=0.55,
         )
 
-    # 2. Subtle floor ground trails (shadow projection for ankles)
-    z_floor = float(np.min(gt[:, :, 2])) - 0.05
-    for j in [4, 5]:
-        ax.plot(
-            gt[:, j, 0],
-            gt[:, j, 1],
-            np.full(N, z_floor),
-            color="gray",
-            linestyle=":",
-            linewidth=0.8,
-            alpha=0.30,
-        )
-
-    # 3. Intermediate skeleton bones
+    # 2. Intermediate skeleton bones
     for j1, j2 in bones:
         ax.plot(
             [gt[f_inter, j1, 0], gt[f_inter, j2, 0]],
@@ -1072,19 +1059,7 @@ def plot_fig6_3d_joint_trajectories(trials_data):
             solid_capstyle="round",
         )
 
-    # 4. Residual error displacement vector connecting GT and TCN
-    for j in range(6):
-        ax.plot(
-            [gt[f_inter, j, 0], tcn[f_inter, j, 0]],
-            [gt[f_inter, j, 1], tcn[f_inter, j, 1]],
-            [gt[f_inter, j, 2], tcn[f_inter, j, 2]],
-            color="black",
-            linestyle=":",
-            linewidth=1.4,
-            alpha=0.85,
-        )
-
-    # 5. Joint markers plotted LAST (on top) with ax.plot so no line covers them
+    # 3. Joint markers plotted LAST (on top) with ax.plot so no line covers them
     for j in range(6):
         ax.plot(
             [gt[f_inter, j, 0]],
@@ -1117,52 +1092,57 @@ def plot_fig6_3d_joint_trajectories(trials_data):
     ax.set_zlabel(zlabel, fontweight="bold", labelpad=6)
     ax.set_title(title, fontsize=11, fontweight="bold", pad=12)
 
-    # ---------------- Bottom Legend ----------------
-    legend_elements = [
-        Line2D(
-            [0], [0], color="black", linestyle="-", linewidth=2.0, label=lbl_gt_traj
-        ),
-        Line2D(
-            [0], [0], color="black", linestyle="--", linewidth=2.0, label=lbl_tcn_traj
-        ),
-        Line2D(
-            [0],
-            [0],
-            color=COLOR_GT,
-            linewidth=3.0,
-            marker="o",
-            markeredgecolor="black",
-            markersize=7.5,
-            label=lbl_gt_skel,
-        ),
-        Line2D(
-            [0],
-            [0],
-            color=COLOR_TCN,
-            linewidth=2.8,
-            linestyle="--",
-            marker="s",
-            markeredgecolor="black",
-            markersize=7.0,
-            label=lbl_tcn_skel,
-        ),
-    ]
-    for j in range(6):
-        legend_elements.append(
-            Line2D([0], [0], color=joint_colors[j], linewidth=2.2, label=joint_names[j])
-        )
-
-    fig.legend(
-        handles=legend_elements,
-        loc="lower center",
-        bbox_to_anchor=(0.5, -0.04),
-        ncol=5,
-        fontsize=8.8,
-        frameon=True,
-        framealpha=0.95,
+    # ---------------- Bottom Legends ----------------
+    # Left block: line style / marker = data source. Right block: color = joint.
+    # Line and marker are drawn side by side (tuple handle) so the marker
+    # does not hide whether the line is solid or dashed
+    marker_kw = dict(
+        linestyle="None", markerfacecolor="white", markeredgecolor="black"
     )
+    source_elements = [
+        (
+            Line2D([0], [0], color="dimgray", linestyle="-", linewidth=2.0),
+            Line2D([0], [0], marker="o", markersize=7.5, **marker_kw),
+        ),
+        (
+            Line2D([0], [0], color="dimgray", linestyle="--", linewidth=2.0),
+            Line2D([0], [0], marker="s", markersize=7.0, **marker_kw),
+        ),
+        Line2D([0], [0], color=COLOR_GT, linewidth=3.6),
+        Line2D([0], [0], color=COLOR_TCN, linewidth=3.0, linestyle="--"),
+    ]
+    source_labels = [lbl_gt_traj, lbl_tcn_traj, lbl_gt_skel, lbl_tcn_skel]
+    # Order fills columns as Hip / Knee / Ankle with rows Right / Left
+    joint_elements = [
+        Line2D([0], [0], color=joint_colors[j], linewidth=3.0, label=joint_names[j])
+        for j in range(6)
+    ]
 
-    plt.subplots_adjust(left=0.03, right=0.97, bottom=0.14, top=0.92)
+    legend_kw = dict(
+        loc="upper center", fontsize=8.8, title_fontsize=9.2, frameon=True, framealpha=0.95
+    )
+    leg_source = fig.legend(
+        handles=source_elements,
+        labels=source_labels,
+        handler_map={tuple: HandlerTuple(ndivide=None, pad=0.4)},
+        handlelength=4.0,
+        title=title_source,
+        bbox_to_anchor=(0.36, 0.21),
+        ncol=2,
+        **legend_kw,
+    )
+    leg_source.get_title().set_fontweight("bold")
+    fig.add_artist(leg_source)
+    leg_joints = fig.legend(
+        handles=joint_elements,
+        title=title_joints,
+        bbox_to_anchor=(0.81, 0.21),
+        ncol=3,
+        **legend_kw,
+    )
+    leg_joints.get_title().set_fontweight("bold")
+
+    plt.subplots_adjust(left=0.03, right=0.97, bottom=0.14, top=0.95)
     suffix = "_en"
     out_png = OUTPUT_DIR / f"fig6_3d_joint_trajectories{suffix}.png"
     out_pdf = OUTPUT_DIR / f"fig6_3d_joint_trajectories{suffix}.pdf"
