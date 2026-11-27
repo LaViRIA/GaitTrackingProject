@@ -156,3 +156,5 @@ python generate_manuscript_figures.py
 ```
 
 The evaluation uses the same test subjects of `data_split.json` and the window stored in each checkpoint (25 samples).
+
+`generate_manuscript_figures.py` uses the checkpoints in `nn-results/`, which are the released ones. The figures of the paper (Figures 2–6) use the representative retrained networks in `nn-results/representative_seed2/` instead; `reproducibility/figures.sh` generates them in a scratch copy, without touching the released checkpoints.
