@@ -28,6 +28,7 @@ reproducibility/multiseed.sh            # 3. retrain + evaluate, seeds 42 1 2 3 
 .venv/bin/python reproducibility/aggregate_seeds.py runs/seed_* \
     --committed runs/committed/eval.log --json runs/aggregate.json
 reproducibility/timing.sh               # 4. execution-time benchmark, run twice     (several minutes)
+reproducibility/figures.sh              # 5. manuscript figures 2-6                   (~2 min)
 ```
 
 | Step | Output | What it does |
@@ -36,11 +37,13 @@ reproducibility/timing.sh               # 4. execution-time benchmark, run twice
 | 3 | `runs/seed_<s>/` | For each seed: `train_all.sh` (all five networks, `SEED=<s>`), then the same evaluation. The training logs go to `runs/seed_<s>/nn-results/train_logs/`. Finished seeds are skipped, so an interrupted run can be resumed by running the command again. To choose the seeds, pass them as arguments: `reproducibility/multiseed.sh 5 6 7`. |
 | 3b | stdout, `runs/aggregate.json` | Per-seed values and mean ± SD of the P95 MPJPE, MAE and RMSE (global and pelvis-relative); the improvement over the analytical pipeline; the best network for each seed; and a paired TCN Lite vs. Transformer test. |
 | 4 | `runs/timing/timing_<host>_run{1,2}.{json,log}` | `benchmark_timing.py`: streaming latency per 25-sample window (GPU, all CPU threads, one CPU thread), offline throughput, and analytical-pipeline cost per frame. The JSON also records the hardware and software versions and the checkpoint hashes. |
+| 5 | `runs/figures/v2_manuscript/figures/`, `runs/figures/figs.log` | `generate_manuscript_figures.py --no-cache` with the representative retrained networks of `nn-results/representative_seed2/` (seed 2, RTX 4060; see its README), copied over the released checkpoints in a scratch copy of the repository. This is how Figures 2–6 of the paper were made: the output should match them pixel for pixel. `CHECKPOINTS=released` uses the released checkpoints instead. The log also prints the biomechanical metrics quoted in the paper. |
 
 Optional environment variables:
 
 - `PYTHON`: interpreter to use (default `.venv/bin/python`).
 - `RUNS_DIR`: output folder (default `runs/`).
+- `CHECKPOINTS`: for `figures.sh`, a folder under `nn-results/` to copy over the released checkpoints (default `representative_seed2`), or `released`.
 
 Runs from several machines can be pooled by passing all their `seed_*` folders to `aggregate_seeds.py`.
 
@@ -79,4 +82,4 @@ Timings depend on the hardware. Compare the two runs on your own machine against
 ## Other entry points
 
 - `python process_all.py`: the analytical pipeline over the whole dataset.
-- `python generate_manuscript_figures.py`: the paper figures. It writes to `v2_manuscript/figures/`; `--dataset` overrides the dataset location.
+- `python generate_manuscript_figures.py`: the figures, with whatever checkpoints are in `nn-results/` (the released ones in a fresh clone). It writes to `v2_manuscript/figures/`; `--dataset` overrides the dataset location. Use `reproducibility/figures.sh` (step 5) to get the figures of the paper.
